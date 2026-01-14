@@ -35,7 +35,7 @@ uploaded_file = st.sidebar.file_uploader("KML da Rodovia", type=['kml'])
 largura = st.sidebar.number_input("Largura da pista (m)", value=7.0)
 area_min = st.sidebar.number_input("Área mínima (m²) - IBRAOP", value=7000.0)
 qtd_desejada = st.sidebar.number_input("Quantidade pretendida", value=50)
-dist_min = st.sidebar.number_input("Distância mínima (m)", value=320.0)
+dist_min = st.sidebar.number_input("Distância mínima entre as amostras (m)", value=320.0)
 recuo_curva = st.sidebar.number_input("Recuo de segurança em curvas (m)", value=150.0)
 
 # --- FUNÇÕES TÉCNICAS ---
