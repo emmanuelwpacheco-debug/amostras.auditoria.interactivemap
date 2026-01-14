@@ -14,7 +14,7 @@ fiona.drvsupport.supported_drivers['KML'] = 'rw'
 
 st.set_page_config(page_title="Auditoria Rodoviária Pro", layout="wide")
 
-# CSS para esconder completamente alertas de carregamento e erros efêmeros
+# CSS para esconder mensagens de processamento e flicker
 st.markdown("""
     <style>
     .stException {display: none;}
@@ -27,8 +27,10 @@ st.title("🚧 Auditoria: Amostragem de Campo")
 # --- INICIALIZAÇÃO DE ESTADO ---
 if 'df_amostras' not in st.session_state:
     st.session_state['df_amostras'] = None
-if 'id_editando' not in st.session_state:
-    st.session_state['id_editando'] = None
+if 'map_center' not in st.session_state:
+    st.session_state['map_center'] = None
+if 'map_zoom' not in st.session_state:
+    st.session_state['map_zoom'] = 16  # Zoom mais aproximado para conferência técnica
 
 # --- SIDEBAR ---
 st.sidebar.header("1. Parâmetros Técnicos")
@@ -88,6 +90,7 @@ if uploaded_file:
 
     st.info(f"📏 **Dados:** {linha_rodovia.length/1000:.2f} km | Mínimo IBRAOP: **{n_min_ibraop} amostras**")
 
+    # Botões de Geração
     if st.session_state['df_amostras'] is None:
         if qtd_desejada < n_min_ibraop:
             st.warning(f"⚠️ Abaixo do IBRAOP ({n_min_ibraop}).")
@@ -105,26 +108,39 @@ if uploaded_file:
     if st.session_state['df_amostras'] is not None:
         df = st.session_state['df_amostras']
         
+        # Centralização inicial se o mapa nunca foi movido
+        if st.session_state['map_center'] is None:
+            st.session_state['map_center'] = [df.Latitude.mean(), df.Longitude.mean()]
+
         st.subheader("🗺️ Ajuste Geográfico")
         col_map, col_ctrl = st.columns([3, 1])
 
         with col_ctrl:
             st.write("**Edição de Amostra**")
             id_para_editar = st.selectbox("ID para mover:", [None] + df['ID'].tolist())
-            st.session_state['id_editando'] = id_para_editar
             
-            # Novo local de clique armazenado em session_state para evitar rerun precoce
             if id_para_editar:
                 st.info("1. Clique no novo local no mapa.\n2. Clique no botão abaixo.")
                 confirmar = st.button("✅ Confirmar Nova Posição")
+                
+                # Botão auxiliar para "Ir até o ponto" caso o usuário se perca
+                if st.button("🔍 Centralizar na Seleção"):
+                    ponto = df[df['ID'] == id_para_editar].iloc[0]
+                    st.session_state['map_center'] = [ponto.Latitude, ponto.Longitude]
+                    st.rerun()
             
+            st.write("---")
             if st.sidebar.button("🗑️ Resetar Tudo"):
                 st.session_state['df_amostras'] = None
+                st.session_state['map_center'] = None
                 st.rerun()
 
         with col_map:
-            # Posição central fixa para o mapa inicial
-            m = folium.Map(location=[df.Latitude.mean(), df.Longitude.mean()], zoom_start=15)
+            # O mapa agora usa a variável de estado para o centro
+            m = folium.Map(
+                location=st.session_state['map_center'], 
+                zoom_start=st.session_state['map_zoom']
+            )
             folium.TileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Google Satellite').add_to(m)
             
             cores = {"Bordo Direito": "red", "Eixo": "blue", "Bordo Esquerdo": "green"}
@@ -138,29 +154,39 @@ if uploaded_file:
                     tooltip=f"ID {row['ID']}"
                 ).add_to(m)
 
-            # O SEGREDO: returned_objects limitado apenas ao clique
-            # Isso impede que o mapa recarregue ao dar ZOOM ou MOVER
-            mapa_res = st_folium(m, width=900, height=500, key="mapa_estavel", returned_objects=["last_clicked"])
+            # Mapa estável com retorno apenas de clique
+            mapa_res = st_folium(
+                m, 
+                width=900, 
+                height=500, 
+                key="mapa_estavel_v5", 
+                returned_objects=["last_clicked"]
+            )
 
-            # Só processa se o botão de confirmação for clicado
+            # LÓGICA DE ATUALIZAÇÃO E RE-CENTRALIZAÇÃO
             if id_para_editar and confirmar and mapa_res.get("last_clicked"):
                 new_lat, new_lon = mapa_res["last_clicked"]["lat"], mapa_res["last_clicked"]["lng"]
                 idx = df.index[df['ID'] == id_para_editar][0]
                 
+                # Projeta na rodovia
                 nova_geom_utm = gpd.GeoSeries([Point(new_lon, new_lat)], crs="EPSG:4326").to_crs(utm_gdf.crs)[0]
                 nova_dist = linha_rodovia.project(nova_geom_utm)
                 
+                # Salva novos dados
                 df.at[idx, 'Latitude'], df.at[idx, 'Longitude'] = new_lat, new_lon
                 df.at[idx, 'geometry'], df.at[idx, 'Quilometragem_m'] = nova_geom_utm, nova_dist
                 df.at[idx, 'Quilometragem'] = f"km {nova_dist/1000:.3f}"
                 
+                # ATUALIZA O CENTRO DO MAPA PARA O NOVO LOCAL
+                st.session_state['map_center'] = [new_lat, new_lon]
                 st.session_state['df_amostras'] = df
+                
                 st.rerun()
 
         st.subheader("📋 Tabela Final")
         st.dataframe(df.drop(columns=['geometry', 'crs_origem', 'Quilometragem_m']), use_container_width=True)
 
-        # Downloads...
+        # Downloads
         c1, c2 = st.columns(2)
         try:
             crs_orig = df['crs_origem'].iloc[0]
