@@ -14,8 +14,7 @@ fiona.drvsupport.supported_drivers['KML'] = 'rw'
 
 st.set_page_config(page_title="Auditoria Rodoviária Pro", layout="wide")
 
-st.title("🚧 Auditoria: Amostragem com Edição Dinâmica")
-st.markdown("Gere as amostras, visualize os pontos e reposicione-os clicando no mapa.")
+st.title("🚧 Auditoria: Amostragem de Campo")
 
 # --- SIDEBAR ---
 st.sidebar.header("1. Parâmetros Técnicos")
@@ -25,15 +24,14 @@ area_min = st.sidebar.number_input("Área mínima por amostra (m²) - IBRAOP", v
 qtd_desejada = st.sidebar.number_input("Quantidade pretendida", value=50, step=1)
 dist_min = st.sidebar.number_input("Distância mínima entre pontos (m)", value=320.0, step=10.0)
 
-# --- FUNÇÕES DE APOIO ---
+# --- FUNÇÕES ---
 def identificar_zonas_curvas(linha, recuo=150):
     zonas = []
     passo = 10
     try:
         for d in range(passo, int(linha.length) - passo, passo):
             p1, p2, p3 = linha.interpolate(d-passo), linha.interpolate(d), linha.interpolate(d+passo)
-            v1 = np.array([p2.x-p1.x, p2.y-p1.y])
-            v2 = np.array([p3.x-p2.x, p3.y-p2.y])
+            v1, v2 = np.array([p2.x-p1.x, p2.y-p1.y]), np.array([p3.x-p2.x, p3.y-p2.y])
             norm = (np.linalg.norm(v1) * np.linalg.norm(v2))
             if norm != 0 and (np.dot(v1, v2)/norm) < 0.9995:
                 zonas.append((d - recuo, d + recuo))
@@ -46,12 +44,10 @@ def gerar_pontos_iniciais(linha, n_pontos, dist_min_m, zonas, largura_p, utm_crs
     ext = linha.length
     while len(amostras) < n_pontos and tentativas < 50000:
         dist = random.uniform(0, ext)
-        if not any(i <= dist <= f for i, f in zonas):
-            if all(abs(dist - a['dist']) >= dist_min_m for a in amostras):
-                amostras.append({'dist': dist})
+        if not any(i <= dist <= f for i, f in zonas) and all(abs(dist - a['dist']) >= dist_min_m for a in amostras):
+            amostras.append({'dist': dist})
         tentativas += 1
     amostras.sort(key=lambda x: x['dist'])
-    
     dados = []
     seq = ["Bordo Direito", "Eixo", "Bordo Esquerdo"]
     for i, amos in enumerate(amostras):
@@ -62,99 +58,119 @@ def gerar_pontos_iniciais(linha, n_pontos, dist_min_m, zonas, largura_p, utm_crs
         geom = Point(p1.x - (p2.y-p1.y)/mag * offset, p1.y + (p2.x-p1.x)/mag * offset)
         p_wgs = gpd.GeoSeries([geom], crs=utm_crs).to_crs(epsg=4326)[0]
         dados.append({
-            'ID': i + 1, 'Identificação': f"Amostra {i+1:02d}",
-            'Posição Lateral': bordo, 'Quilometragem_m': amos['dist'],
-            'Quilometragem': f"km {amos['dist']/1000:.3f}",
-            'Latitude': p_wgs.y, 'Longitude': p_wgs.x, 
-            'geometry': geom, 'crs_origem': utm_crs
+            'ID': i + 1, 'Identificação': f"Amostra {i+1:02d}", 'Posição Lateral': bordo,
+            'Quilometragem_m': amos['dist'], 'Quilometragem': f"km {amos['dist']/1000:.3f}",
+            'Latitude': p_wgs.y, 'Longitude': p_wgs.x, 'geometry': geom, 'crs_origem': utm_crs
         })
     return pd.DataFrame(dados)
 
 # --- LÓGICA PRINCIPAL ---
 if uploaded_file:
-    # Memorial de Cálculo e Informações do Trecho
     gdf_origem = gpd.read_file(uploaded_file, driver='KML')
     utm_gdf = gdf_origem.to_crs(gdf_origem.estimate_utm_crs())
     linha_rodovia = utm_gdf.geometry.iloc[0]
-    extensao_total = linha_rodovia.length
-    n_min_ibraop = int(np.ceil((extensao_total * largura) / area_min))
+    n_min_ibraop = int(np.ceil((linha_rodovia.length * largura) / area_min))
 
-    st.info(f"📏 **Dados do Trecho:** Extensão: {extensao_total/1000:.2f} km | Mínimo IBRAOP: **{n_min_ibraop} amostras**")
+    st.info(f"📏 **Dados do Trecho:** Extensão: {linha_rodovia.length/1000:.2f} km | Mínimo IBRAOP: **{n_min_ibraop} amostras**")
 
-    # Botão de geração inicial
-    if st.sidebar.button("♻️ Gerar Novas Amostras"):
+    # Alerta de Quantidade
+    executar = False
+    n_final = qtd_desejada
+    if qtd_desejada < n_min_ibraop:
+        st.warning(f"⚠️ Quantidade solicitada ({qtd_desejada}) inferior ao IBRAOP ({n_min_ibraop}).")
+        c_alt1, c_alt2 = st.columns(2)
+        if c_alt1.button(f"Corrigir p/ {n_min_ibraop}"): 
+            n_final, executar = n_min_ibraop, True
+        if c_alt2.button(f"Manter {qtd_desejada}"): 
+            n_final, executar = qtd_desejada, True
+    elif st.sidebar.button("Gerar Amostras"):
+        executar = True
+
+    if executar:
         zonas = identificar_zonas_curvas(linha_rodovia)
-        n_pontos = max(qtd_desejada, n_min_ibraop) if qtd_desejada >= n_min_ibraop else qtd_desejada
-        st.session_state['df_amostras'] = gerar_pontos_iniciais(linha_rodovia, n_pontos, dist_min, zonas, largura, utm_gdf.crs.to_string())
+        st.session_state['df_amostras'] = gerar_pontos_iniciais(linha_rodovia, n_final, dist_min, zonas, largura, utm_gdf.crs.to_string())
+        st.session_state['id_editando'] = None
 
     if 'df_amostras' in st.session_state and st.session_state['df_amostras'] is not None:
         df = st.session_state['df_amostras']
+        
+        # Painel de Controle de Edição
+        st.subheader("🗺️ Ajuste Geográfico")
+        id_edit = st.session_state.get('id_editando')
+        if id_edit:
+            st.success(f"📍 **Modo de Edição Ativo:** Clique no mapa para mover a **{df.loc[df['ID']==id_edit, 'Identificação'].values[0]}**")
+            if st.button("Cancelar Edição"): 
+                st.session_state['id_editando'] = None
+                st.rerun()
+        else:
+            st.info("👆 **Dica:** Clique em um ponto no mapa para selecioná-lo para ajuste.")
 
-        # Área de Edição
-        with st.expander("🛠️ Painel de Ajuste Manual", expanded=True):
-            col_edit1, col_edit2 = st.columns([1, 2])
-            with col_edit1:
-                idx_selecionado = st.selectbox("Selecione o ID para reposicionar:", df['ID'].tolist())
-                st.write(f"Você está editando a **{df.loc[df['ID']==idx_selecionado, 'Identificação'].values[0]}**")
-                st.caption("Ao clicar no mapa à direita, este ponto mudará para a nova posição.")
-            
-            with col_edit2:
-                # Mapa Interativo
-                m = folium.Map(location=[df.Latitude.mean(), df.Longitude.mean()], zoom_start=15)
-                folium.TileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Google Satellite').add_to(m)
+        # Configuração do Mapa e Zoom
+        center = [df.Latitude.mean(), df.Longitude.mean()]
+        zoom = st.session_state.get('map_zoom', 14)
+        if 'map_center' in st.session_state: center = st.session_state['map_center']
+
+        m = folium.Map(location=center, zoom_start=zoom)
+        folium.TileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Google Satellite').add_to(m)
+        
+        cores = {"Bordo Direito": "red", "Eixo": "blue", "Bordo Esquerdo": "green"}
+        for _, row in df.iterrows():
+            folium.CircleMarker(
+                location=[row['Latitude'], row['Longitude']],
+                radius=10 if row['ID'] == id_edit else 7,
+                color="yellow" if row['ID'] == id_edit else "white",
+                fill=True, fill_color=cores[row['Posição Lateral']], fill_opacity=0.9,
+                tooltip=f"{row['Identificação']} ({row['Quilometragem']})",
+                popup=folium.Popup(f"Clique para editar {row['Identificação']}", parse_html=True)
+            ).add_to(m)
+
+        mapa_data = st_folium(m, width=1100, height=550, key="mapa_main")
+
+        # Lógica de interação com o mapa
+        if mapa_data:
+            # 1. Salva zoom e centro para não perder a referência
+            st.session_state['map_zoom'] = mapa_data['zoom']
+            st.session_state['map_center'] = [mapa_data['center']['lat'], mapa_data['center']['lng']]
+
+            # 2. Se clicou em um objeto (ponto), seleciona para edição
+            if mapa_data.get("last_object_clicked"):
+                # Extrai o ID a partir da lógica de proximidade ou ordem (Folium simplificado)
+                click_lat = mapa_data["last_object_clicked"]["lat"]
+                # Encontra o ponto mais próximo do clique para selecionar o ID
+                distancias = np.sqrt((df.Latitude - click_lat)**2 + (df.Longitude - mapa_data["last_object_clicked"]["lng"])**2)
+                st.session_state['id_editando'] = int(df.loc[distancias.idxmin(), 'ID'])
+                st.rerun()
+
+            # 3. Se o modo edição está ativo e clicou no mapa (vazio), move o ponto
+            if id_edit and mapa_data.get("last_clicked"):
+                new_lat, new_lon = mapa_data["last_clicked"]["lat"], mapa_data["last_clicked"]["lng"]
+                idx = df.index[df['ID'] == id_edit][0]
+                nova_geom_utm = gpd.GeoSeries([Point(new_lon, new_lat)], crs="EPSG:4326").to_crs(utm_gdf.crs)[0]
+                nova_dist = linha_rodovia.project(nova_geom_utm)
                 
-                cores = {"Bordo Direito": "red", "Eixo": "blue", "Bordo Esquerdo": "green"}
-                for _, row in df.iterrows():
-                    is_active = (row['ID'] == idx_selecionado)
-                    folium.CircleMarker(
-                        location=[row['Latitude'], row['Longitude']],
-                        radius=9 if is_active else 6,
-                        color="yellow" if is_active else "white",
-                        fill=True,
-                        fill_color=cores[row['Posição Lateral']],
-                        fill_opacity=0.9,
-                        popup=f"ID: {row['ID']} | {row['Posição Lateral']}<br>{row['Quilometragem']}"
-                    ).add_to(m)
+                df.at[idx, 'Latitude'], df.at[idx, 'Longitude'] = new_lat, new_lon
+                df.at[idx, 'geometry'], df.at[idx, 'Quilometragem_m'] = nova_geom_utm, nova_dist
+                df.at[idx, 'Quilometragem'] = f"km {nova_dist/1000:.3f}"
+                
+                st.session_state['df_amostras'] = df
+                st.session_state['id_editando'] = None # Desativa edição após mover
+                st.rerun()
 
-                # Captura clique
-                mapa_click = st_folium(m, width=700, height=450, key="mapa_edicao")
-
-                if mapa_click and mapa_click.get("last_clicked"):
-                    new_lat = mapa_click["last_clicked"]["lat"]
-                    new_lon = mapa_click["last_clicked"]["lng"]
-                    
-                    idx_no_df = df.index[df['ID'] == idx_selecionado][0]
-                    
-                    # Recalcula geometria e KM
-                    nova_geom_wgs = Point(new_lon, new_lat)
-                    nova_geom_utm = gpd.GeoSeries([nova_geom_wgs], crs="EPSG:4326").to_crs(utm_gdf.crs)[0]
-                    nova_dist = linha_rodovia.project(nova_geom_utm)
-                    
-                    df.at[idx_no_df, 'Latitude'] = new_lat
-                    df.at[idx_no_df, 'Longitude'] = new_lon
-                    df.at[idx_no_df, 'geometry'] = nova_geom_utm
-                    df.at[idx_no_df, 'Quilometragem_m'] = nova_dist
-                    df.at[idx_no_df, 'Quilometragem'] = f"km {nova_dist/1000:.3f}"
-                    
-                    st.session_state['df_amostras'] = df
-                    st.rerun()
-
-        # Tabela de Resultados
-        st.subheader("📋 Tabela Final de Amostras")
+        st.subheader("📋 Tabela Final")
         st.dataframe(df.drop(columns=['geometry', 'crs_origem', 'Quilometragem_m']), use_container_width=True)
 
-        # Downloads
         c1, c2 = st.columns(2)
+        # Lógica de download simplificada (Excel e KML)
         try:
             crs_orig = df['crs_origem'].iloc[0]
             amostras_gdf = gpd.GeoDataFrame(df, geometry='geometry', crs=crs_orig).to_crs(epsg=4326)
-            amostras_gdf['Name'] = amostras_gdf['Identificação'] + " - " + amostras_gdf['Posição Lateral']
+            amostras_gdf['Name'] = amostras_gdf['Identificação']
             buf_kml = io.BytesIO()
             amostras_gdf[['Name', 'geometry']].to_file(buf_kml, driver='KML')
-            c1.download_button("📥 Baixar KML Atualizado", buf_kml.getvalue(), "amostras_revisadas.kml")
+            c1.download_button("📥 Baixar KML", buf_kml.getvalue(), "amostras.kml")
             
             buf_xlsx = io.BytesIO()
-            with pd.ExcelWriter(buf_xlsx, engine='openpyxl') as writer:
-                df.drop(columns=['geometry', 'crs_origem', 'Quilometragem_m']).to_excel(writer, index=False)
-            c2.download_button("📥 Baixar Excel Atualizado", buf_xlsx.getvalue(), "amostras_revisadas.xlsx")
-        except: st.error("Erro na geração dos arquivos de saída.")
+            with pd.ExcelWriter(buf_xlsx) as w:
+                df.drop(columns=['geometry', 'crs_origem', 'Quilometragem_m']).to_excel(w, index=False)
+            c2.download_button("📥 Baixar Excel", buf_xlsx.getvalue(), "amostras.xlsx")
+        except: st.error("Erro na exportação.")
