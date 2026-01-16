@@ -121,8 +121,7 @@ if uploaded_file:
     # Geração
     if st.session_state['df_amostras'] is None:
         if qtd_desejada > capacidade_max:
-            st.error(f"🚨 Capacidade excedida. A quantidade máxima de amostras para o trecho com estes parâmetros: {capacidade_max} amostras.
-            Reveja os parâmetros inseridos")
+            st.error(f"🚨 Capacidade excedida. A quantidade máxima de amostras para o trecho com estes parâmetros: {capacidade_max} amostras")
         else:
             n_alvo = None
             if qtd_desejada < n_min_ibraop:
