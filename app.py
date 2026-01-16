@@ -37,12 +37,12 @@ area_min = st.sidebar.number_input("Área mínima (m²) - IBRAOP", value=7000.0)
 
 st.sidebar.header("2. Restrições de Amostragem")
 qtd_desejada = st.sidebar.number_input("Quantidade pretendida", value=50)
-dist_min = st.sidebar.number_input("Distância mínima (m)", value=320.0)
-recuo_curva = st.sidebar.number_input("Recuo em curvas (m)", value=150.0)
+dist_min = st.sidebar.number_input("Distância mínima entre amostras (m)", value=320.0)
+recuo_curva = st.sidebar.number_input("Distância mínima até as curvas (m)", value=150.0)
 
 # Novo parâmetro de rigidez para garantir repetibilidade
 sensibilidade = st.sidebar.number_input(
-    "Rigidez na Curva (Graus)", 
+    "Limite de deflexão angular (Graus)", 
     min_value=0.1, max_value=10.0, value=1.5, step=0.1,
     help="Define a deflexão angular. 1.5° a cada 20m é o padrão para evitar ruídos do KML."
 )
@@ -121,7 +121,8 @@ if uploaded_file:
     # Geração
     if st.session_state['df_amostras'] is None:
         if qtd_desejada > capacidade_max:
-            st.error(f"🚨 Capacidade excedida. Máximo possível para estes parâmetros: {capacidade_max} amostras.")
+            st.error(f"🚨 Capacidade excedida. A quantidade máxima de amostras para o trecho com estes parâmetros: {capacidade_max} amostras.
+            Reveja os parâmetros inseridos")
         else:
             n_alvo = None
             if qtd_desejada < n_min_ibraop:
@@ -143,7 +144,7 @@ if uploaded_file:
         if st.session_state['map_center'] is None:
             st.session_state['map_center'] = [df.Latitude.mean(), df.Longitude.mean()]
 
-        st.subheader("🗺️ Ajuste Geográfico")
+        st.subheader("🗺️ Pré-visualização das amostras")
         col_map, col_ctrl = st.columns([3, 1])
 
         with col_ctrl:
