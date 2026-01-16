@@ -36,9 +36,9 @@ if 'map_zoom' not in st.session_state:
 st.sidebar.header("1. Parâmetros Técnicos")
 uploaded_file = st.sidebar.file_uploader("KML da Rodovia", type=['kml'])
 largura = st.sidebar.number_input("Largura da pista (m)", value=7.0)
-area_min = st.sidebar.number_input("Área mínima (m²) - IBRAOP", value=7000.0)
+area_min = st.sidebar.number_input("Área mínima (m²) - PROC–IBR–ROD 101/2016-IBRAOP", value=7000.0)
 qtd_desejada = st.sidebar.number_input("Quantidade pretendida", value=50)
-dist_min = st.sidebar.number_input("Distância mínima (m)", value=320.0)
+dist_min = st.sidebar.number_input("Distância mínima entre as amostras (m)", value=320.0)
 recuo_curva = st.sidebar.number_input("Recuo em curvas (m)", value=150.0)
 
 # --- FUNÇÕES TÉCNICAS ---
@@ -93,7 +93,7 @@ if uploaded_file:
     # Botões de Geração
     if st.session_state['df_amostras'] is None:
         if qtd_desejada < n_min_ibraop:
-            st.warning(f"⚠️ Abaixo do IBRAOP ({n_min_ibraop}).")
+            st.warning(f"⚠️ Quantidade de amostras abaixo dos requisitos do PROC–IBR–ROD 101/2016-IBRAOP ({n_min_ibraop}).")
             c1, c2 = st.columns(2)
             if c1.button(f"Gerar Mínimo ({n_min_ibraop})"):
                 st.session_state['df_amostras'] = gerar_pontos_iniciais(linha_rodovia, n_min_ibraop, dist_min, identificar_zonas_curvas(linha_rodovia, recuo_curva), largura, utm_gdf.crs.to_string())
