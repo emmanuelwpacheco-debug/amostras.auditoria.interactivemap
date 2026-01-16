@@ -36,9 +36,10 @@ largura = st.sidebar.number_input("Largura da pista (m)", value=7.0)
 area_min = st.sidebar.number_input("Área mínima (m²) - IBRAOP", value=7000.0)
 
 st.sidebar.header("2. Restrições Técnicas")
-qtd_desejada = st.sidebar.number_input("Quantidade pretendida", value=50)
-dist_min = st.sidebar.number_input("Distância mínima (m)", value=320.0)
+qtd_desejada = st.sidebar.number_input("Quantidade pretendida", value= 20)
+dist_min = st.sidebar.number_input("Distância mínima entre amostras (m)", value= 150.0 )
 recuo_curva = st.sidebar.number_input("Recuo em curvas (m)", value=150.0)
+step= 10
 
 # AJUSTE: Trocando Slider por Number Input para melhor usabilidade
 sensibilidade_curva = st.sidebar.number_input(
