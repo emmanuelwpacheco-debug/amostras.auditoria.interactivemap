@@ -14,7 +14,7 @@ fiona.drvsupport.supported_drivers['KML'] = 'rw'
 
 st.set_page_config(page_title="Auditoria Rodoviária Pro", layout="wide")
 
-# CSS para esconder mensagens de processamento e flicker
+# CSS para interface limpa e estável
 st.markdown("""
     <style>
     .stException {display: none;}
@@ -37,14 +37,24 @@ area_min = st.sidebar.number_input("Área mínima (m²) - IBRAOP", value=7000.0)
 
 st.sidebar.header("2. Restrições Técnicas")
 qtd_desejada = st.sidebar.number_input("Quantidade pretendida", value=50)
-dist_min = st.sidebar.number_input("Distância mínima entre amostras (m)", value=320.0)
+dist_min = st.sidebar.number_input("Distância mínima (m)", value=320.0)
 recuo_curva = st.sidebar.number_input("Recuo em curvas (m)", value=150.0)
-sensibilidade_curva = st.sidebar.slider("Sensibilidade de Curva (Menor = Ignora ruídos)", 0.9900, 0.9999, 0.9980, format="%.4f")
+
+# AJUSTE: Trocando Slider por Number Input para melhor usabilidade
+sensibilidade_curva = st.sidebar.number_input(
+    "Sensibilidade de Curva (0.9900 a 0.9999)", 
+    min_value=0.9900, 
+    max_value=0.9999, 
+    value=0.9980, 
+    format="%.4f",
+    step=0.0005,
+    help="Valores menores (ex: 0.9950) ignoram pequenas oscilações do KML. Valores maiores são mais rigorosos."
+)
 
 # --- FUNÇÕES TÉCNICAS ---
 def identificar_zonas_curvas(linha, recuo, sensibilidade):
     zonas = []
-    passo = 30 # Passo de 30m para filtrar ruídos de GPS/KML
+    passo = 30 
     extensao = int(linha.length)
     if extensao < passo * 2: return []
 
@@ -95,25 +105,23 @@ def gerar_pontos_robustos(linha, n_pontos, dist_min_m, zonas, largura_p, utm_crs
         })
     return pd.DataFrame(dados)
 
-# --- LÓGICA PRINCIPAL ---
+# --- LÓGICA ---
 if uploaded_file:
     gdf_origem = gpd.read_file(uploaded_file, driver='KML')
     utm_gdf = gdf_origem.to_crs(gdf_origem.estimate_utm_crs())
     linha_rodovia = utm_gdf.geometry.iloc[0]
     n_min_ibraop = int(np.ceil((linha_rodovia.length * largura) / area_min))
 
-    # Análise Prévia
     zonas_c = identificar_zonas_curvas(linha_rodovia, recuo_curva, sensibilidade_curva)
-    extensao_curvas = sum([(f - i) for i, f in zonas_c])
-    ext_util = max(0, linha_rodovia.length - extensao_curvas)
+    ext_curvas = sum([(f - i) for i, f in zonas_c])
+    ext_util = max(0, linha_rodovia.length - ext_curvas)
     capacidade_max = int(ext_util // dist_min) if ext_util > 0 else 0
 
-    st.info(f"📏 **Total:** {linha_rodovia.length/1000:.2f} km | **Útil (Tangentes):** {ext_util/1000:.2f} km | **Capacidade:** {capacidade_max} amostras")
+    st.info(f"📏 **Total:** {linha_rodovia.length/1000:.2f} km | **Útil:** {ext_util/1000:.2f} km | **Capacidade:** {capacidade_max} amostras")
 
-    # GERAÇÃO INICIAL
     if st.session_state['df_amostras'] is None:
         if qtd_desejada > capacidade_max:
-            st.error(f"🚨 **Impossível gerar {qtd_desejada} amostras.** Com o recuo de curvas, a capacidade máxima é {capacidade_max}. Reduza a sensibilidade de curva ou a distância mínima.")
+            st.error(f"🚨 Capacidade insuficiente ({capacidade_max} máx). Ajuste a sensibilidade numérica ou o recuo.")
         else:
             n_alvo = None
             if qtd_desejada < n_min_ibraop:
@@ -128,21 +136,18 @@ if uploaded_file:
                 st.session_state['df_amostras'] = gerar_pontos_robustos(linha_rodovia, n_alvo, dist_min, zonas_c, largura, utm_gdf.crs.to_string())
                 st.rerun()
 
-    # INTERFACE DE AJUSTE (MAPA + TABELA)
     if st.session_state['df_amostras'] is not None:
         df = st.session_state['df_amostras']
         
-        st.subheader("🗺️ Ajuste e Visualização")
         col_map, col_ctrl = st.columns([3, 1])
 
         with col_ctrl:
-            id_para_editar = st.selectbox("Mover Amostra ID:", [None] + df['ID'].tolist())
+            id_para_editar = st.selectbox("ID para mover:", [None] + df['ID'].tolist())
             if id_para_editar:
-                st.success("Clique no novo local no mapa")
-                confirmar = st.button("✅ Confirmar Posição")
+                st.success("Clique no mapa e confirme")
+                confirmar = st.button("✅ Confirmar Nova Posição")
             if st.sidebar.button("🗑️ Resetar Tudo"):
                 st.session_state['df_amostras'] = None
-                st.session_state['map_center'] = None
                 st.rerun()
 
         with col_map:
@@ -152,11 +157,10 @@ if uploaded_file:
             folium.TileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google', name='Google Satellite').add_to(m)
             
             for _, row in df.iterrows():
-                is_ed = (row['ID'] == id_para_editar)
                 folium.CircleMarker(
                     location=[row['Latitude'], row['Longitude']],
-                    radius=10 if is_ed else 7,
-                    color="yellow" if is_ed else "white",
+                    radius=10 if row['ID'] == id_para_editar else 7,
+                    color="yellow" if row['ID'] == id_para_editar else "white",
                     fill=True, fill_color="blue" if row['Posição Lateral']=="Eixo" else ("red" if "Direito" in row['Posição Lateral'] else "green"),
                     fill_opacity=0.9
                 ).add_to(m)
@@ -175,12 +179,11 @@ if uploaded_file:
                 st.session_state['df_amostras'] = df
                 st.rerun()
 
-        st.subheader("📋 Tabela e Exportação")
+        st.subheader("📋 Resultados e Download")
         st.dataframe(df.drop(columns=['geometry', 'crs_origem', 'Quilometragem_m']), use_container_width=True)
 
         c1, c2 = st.columns(2)
         try:
-            # Exportar KML
             crs_orig = df['crs_origem'].iloc[0]
             amostras_gdf = gpd.GeoDataFrame(df, geometry='geometry', crs=crs_orig).to_crs(epsg=4326)
             amostras_gdf['Name'] = amostras_gdf['Identificação']
@@ -188,7 +191,6 @@ if uploaded_file:
             amostras_gdf[['Name', 'geometry']].to_file(buf_kml, driver='KML')
             c1.download_button("📥 Baixar KML", buf_kml.getvalue(), "amostras.kml")
 
-            # Exportar Excel
             buf_xlsx = io.BytesIO()
             with pd.ExcelWriter(buf_xlsx) as w:
                 df.drop(columns=['geometry', 'crs_origem', 'Quilometragem_m']).to_excel(w, index=False)
