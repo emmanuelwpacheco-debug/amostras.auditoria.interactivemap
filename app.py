@@ -9,10 +9,12 @@ import io
 import folium
 from streamlit_folium import st_folium
 
+# Configuração de drivers KML
 fiona.drvsupport.supported_drivers['KML'] = 'rw'
 
 st.set_page_config(page_title="Auditoria Rodoviária Pro", layout="wide")
 
+# CSS para esconder mensagens de processamento e flicker
 st.markdown("""
     <style>
     .stException {display: none;}
@@ -22,44 +24,59 @@ st.markdown("""
 
 st.title("🚧 Auditoria: Amostragem de Campo")
 
-# --- ESTADO ---
+# --- INICIALIZAÇÃO DE ESTADO ---
 if 'df_amostras' not in st.session_state: st.session_state['df_amostras'] = None
 if 'map_center' not in st.session_state: st.session_state['map_center'] = None
 if 'map_zoom' not in st.session_state: st.session_state['map_zoom'] = 16
 
 # --- SIDEBAR ---
-st.sidebar.header("1. Parâmetros Técnicos")
+st.sidebar.header("1. Arquivo e Geometria")
 uploaded_file = st.sidebar.file_uploader("KML da Rodovia", type=['kml'])
 largura = st.sidebar.number_input("Largura da pista (m)", value=7.0)
 area_min = st.sidebar.number_input("Área mínima (m²) - IBRAOP", value=7000.0)
+
+st.sidebar.header("2. Restrições Técnicas")
 qtd_desejada = st.sidebar.number_input("Quantidade pretendida", value=50)
-dist_min = st.sidebar.number_input("Distância mínima (m)", value=320.0)
+dist_min = st.sidebar.number_input("Distância mínima entre amostras (m)", value=320.0)
 recuo_curva = st.sidebar.number_input("Recuo em curvas (m)", value=150.0)
+sensibilidade_curva = st.sidebar.slider("Sensibilidade de Curva (Menor = Ignora ruídos)", 0.9900, 0.9999, 0.9980, format="%.4f")
 
 # --- FUNÇÕES TÉCNICAS ---
-def identificar_zonas_curvas(linha, recuo):
+def identificar_zonas_curvas(linha, recuo, sensibilidade):
     zonas = []
-    passo = 10
-    try:
-        extensao = int(linha.length)
-        for d in range(passo, extensao - passo, passo):
-            p1, p2, p3 = linha.interpolate(d-passo), linha.interpolate(d), linha.interpolate(d+passo)
-            v1, v2 = np.array([p2.x-p1.x, p2.y-p1.y]), np.array([p3.x-p2.x, p3.y-p2.y])
-            norm = (np.linalg.norm(v1) * np.linalg.norm(v2))
-            if norm > 0 and (np.dot(v1, v2)/norm) < 0.9995:
-                zonas.append((d - recuo, d + recuo))
-    except: pass
-    return zonas
+    passo = 30 # Passo de 30m para filtrar ruídos de GPS/KML
+    extensao = int(linha.length)
+    if extensao < passo * 2: return []
+
+    for d in range(passo, extensao - passo, passo):
+        p1, p2, p3 = linha.interpolate(d-passo), linha.interpolate(d), linha.interpolate(d+passo)
+        v1, v2 = np.array([p2.x-p1.x, p2.y-p1.y]), np.array([p3.x-p2.x, p3.y-p2.y])
+        norm = (np.linalg.norm(v1) * np.linalg.norm(v2))
+        if norm > 0 and (np.dot(v1, v2)/norm) < sensibilidade:
+            zonas.append((max(0, d - recuo), min(extensao, d + recuo)))
+    
+    if not zonas: return []
+    zonas.sort()
+    unidas = []
+    curr_ini, curr_fim = zonas[0]
+    for i in range(1, len(zonas)):
+        prox_ini, prox_fim = zonas[i]
+        if prox_ini <= curr_fim:
+            curr_fim = max(curr_fim, prox_fim)
+        else:
+            unidas.append((curr_ini, curr_fim))
+            curr_ini, curr_fim = prox_ini, prox_fim
+    unidas.append((curr_ini, curr_fim))
+    return unidas
 
 def gerar_pontos_robustos(linha, n_pontos, dist_min_m, zonas, largura_p, utm_crs):
     amostras_dists = []
     extensao = linha.length
-    for _ in range(150000): # Alta persistência
+    for _ in range(100000):
         if len(amostras_dists) >= n_pontos: break
         dist = random.uniform(0, extensao)
-        if not any(i <= dist <= f for i, f in zonas):
-            if all(abs(dist - d) >= dist_min_m for d in amostras_dists):
-                amostras_dists.append(dist)
+        if not any(i <= dist <= f for i, f in zonas) and all(abs(dist - d) >= dist_min_m for d in amostras_dists):
+            amostras_dists.append(dist)
     
     amostras_dists.sort()
     dados = []
@@ -78,59 +95,51 @@ def gerar_pontos_robustos(linha, n_pontos, dist_min_m, zonas, largura_p, utm_crs
         })
     return pd.DataFrame(dados)
 
-# --- LÓGICA DE INTERFACE ---
+# --- LÓGICA PRINCIPAL ---
 if uploaded_file:
     gdf_origem = gpd.read_file(uploaded_file, driver='KML')
     utm_gdf = gdf_origem.to_crs(gdf_origem.estimate_utm_crs())
     linha_rodovia = utm_gdf.geometry.iloc[0]
     n_min_ibraop = int(np.ceil((linha_rodovia.length * largura) / area_min))
 
-    # --- MÓDULO DE AVALIAÇÃO PRÉVIA ---
-    zonas_c = identificar_zonas_curvas(linha_rodovia, recuo_curva)
+    # Análise Prévia
+    zonas_c = identificar_zonas_curvas(linha_rodovia, recuo_curva, sensibilidade_curva)
     extensao_curvas = sum([(f - i) for i, f in zonas_c])
-    extensao_util = max(0, linha_rodovia.length - extensao_curvas)
-    capacidade_max = int(extensao_util // dist_min)
+    ext_util = max(0, linha_rodovia.length - extensao_curvas)
+    capacidade_max = int(ext_util // dist_min) if ext_util > 0 else 0
 
-    st.info(f"📏 **Análise do Trecho:** {linha_rodovia.length/1000:.2f} km | Útil: {extensao_util/1000:.2f} km | Mínimo IBRAOP: **{n_min_ibraop}**")
+    st.info(f"📏 **Total:** {linha_rodovia.length/1000:.2f} km | **Útil (Tangentes):** {ext_util/1000:.2f} km | **Capacidade:** {capacidade_max} amostras")
 
+    # GERAÇÃO INICIAL
     if st.session_state['df_amostras'] is None:
-        # VALIDAÇÃO DE CONTORNO ANTES DE GERAR
         if qtd_desejada > capacidade_max:
-            st.error(f"### 🛑 Erro de Condicionantes\n"
-                     f"A quantidade desejada (**{qtd_desejada}**) é impossível para os parâmetros atuais.\n\n"
-                     f"* **Capacidade Máxima do Trecho:** {capacidade_max} amostras.\n"
-                     f"* **Motivo:** Espaçamento de {dist_min}m em uma área útil de {extensao_util/1000:.2f}km.\n\n"
-                     f"👉 *Reduza a 'Distância mínima' ou a 'Quantidade pretendida'.*")
+            st.error(f"🚨 **Impossível gerar {qtd_desejada} amostras.** Com o recuo de curvas, a capacidade máxima é {capacidade_max}. Reduza a sensibilidade de curva ou a distância mínima.")
         else:
             n_alvo = None
             if qtd_desejada < n_min_ibraop:
                 st.warning(f"⚠️ Abaixo do IBRAOP ({n_min_ibraop}).")
                 c1, c2 = st.columns(2)
-                if c1.button(f"Gerar {n_min_ibraop} (Mín. IBRAOP)"): n_alvo = n_min_ibraop
+                if c1.button(f"Gerar {n_min_ibraop} (IBRAOP)"): n_alvo = n_min_ibraop
                 if c2.button(f"Manter {qtd_desejada}"): n_alvo = qtd_desejada
             elif st.sidebar.button("Gerar Amostras"):
                 n_alvo = qtd_desejada
 
             if n_alvo:
-                if n_alvo > capacidade_max:
-                    st.toast(f"Capacidade insuficiente para {n_alvo}!", icon="🚫")
-                else:
-                    df_res = gerar_pontos_robustos(linha_rodovia, n_alvo, dist_min, zonas_c, largura, utm_gdf.crs.to_string())
-                    st.session_state['df_amostras'] = df_res
-                    st.rerun()
+                st.session_state['df_amostras'] = gerar_pontos_robustos(linha_rodovia, n_alvo, dist_min, zonas_c, largura, utm_gdf.crs.to_string())
+                st.rerun()
 
+    # INTERFACE DE AJUSTE (MAPA + TABELA)
     if st.session_state['df_amostras'] is not None:
         df = st.session_state['df_amostras']
         
-        # --- PAINEL DE AJUSTE E MAPA ---
-        st.subheader("🗺️ Ajuste Geográfico")
+        st.subheader("🗺️ Ajuste e Visualização")
         col_map, col_ctrl = st.columns([3, 1])
 
         with col_ctrl:
-            id_para_editar = st.selectbox("ID para mover:", [None] + df['ID'].tolist())
+            id_para_editar = st.selectbox("Mover Amostra ID:", [None] + df['ID'].tolist())
             if id_para_editar:
-                st.info("Clique no mapa e confirme.")
-                confirmar = st.button("✅ Confirmar Nova Posição")
+                st.success("Clique no novo local no mapa")
+                confirmar = st.button("✅ Confirmar Posição")
             if st.sidebar.button("🗑️ Resetar Tudo"):
                 st.session_state['df_amostras'] = None
                 st.session_state['map_center'] = None
@@ -152,7 +161,7 @@ if uploaded_file:
                     fill_opacity=0.9
                 ).add_to(m)
 
-            mapa_res = st_folium(m, width=900, height=500, key="mapa_v6", returned_objects=["last_clicked"])
+            mapa_res = st_folium(m, width=900, height=500, key="mapa_final", returned_objects=["last_clicked"])
 
             if id_para_editar and confirmar and mapa_res.get("last_clicked"):
                 new_lat, new_lon = mapa_res["last_clicked"]["lat"], mapa_res["last_clicked"]["lng"]
@@ -166,20 +175,20 @@ if uploaded_file:
                 st.session_state['df_amostras'] = df
                 st.rerun()
 
-        st.subheader("📋 Resultados")
+        st.subheader("📋 Tabela e Exportação")
         st.dataframe(df.drop(columns=['geometry', 'crs_origem', 'Quilometragem_m']), use_container_width=True)
 
-        # DOWNLOADS
         c1, c2 = st.columns(2)
         try:
+            # Exportar KML
             crs_orig = df['crs_origem'].iloc[0]
             amostras_gdf = gpd.GeoDataFrame(df, geometry='geometry', crs=crs_orig).to_crs(epsg=4326)
             amostras_gdf['Name'] = amostras_gdf['Identificação']
-            
             buf_kml = io.BytesIO()
             amostras_gdf[['Name', 'geometry']].to_file(buf_kml, driver='KML')
             c1.download_button("📥 Baixar KML", buf_kml.getvalue(), "amostras.kml")
-            
+
+            # Exportar Excel
             buf_xlsx = io.BytesIO()
             with pd.ExcelWriter(buf_xlsx) as w:
                 df.drop(columns=['geometry', 'crs_origem', 'Quilometragem_m']).to_excel(w, index=False)
