@@ -30,17 +30,27 @@ def extrair_data_foto(foto):
     return None
 
 def processar_gpx(gpx_raw):
-    gpx = gpxpy.parse(gpx_raw)
+    # Converte o conteúdo carregado para string para o gpxpy ler corretamente
+    gpx_str = gpx_raw.getvalue().decode("utf-8")
+    gpx = gpxpy.parse(gpx_str)
     pontos = []
+    
     for track in gpx.tracks:
         for segment in track.segments:
             for point in segment.points:
-                pontos.append({
-                    'time': point.time.replace(tzinfo=None),
-                    'lat': point.latitude,
-                    'lon': point.longitude,
-                    'alt': point.elevation
-                })
+                # VERIFICAÇÃO: Só adiciona o ponto se ele tiver informação de tempo
+                if point.time is not None:
+                    pontos.append({
+                        'time': point.time.replace(tzinfo=None),
+                        'lat': point.latitude,
+                        'lon': point.longitude,
+                        'alt': point.elevation
+                    })
+    
+    if not pontos:
+        st.error("🚨 O arquivo GPX não contém informações de tempo (timestamps). Sem isso, não é possível sincronizar com as fotos.")
+        return pd.DataFrame()
+        
     return pd.DataFrame(pontos)
 
 # --- LÓGICA PRINCIPAL ---
