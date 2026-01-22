@@ -7,3 +7,6 @@ pyproj
 openpyxl
 folium
 streamlit-folium
+gpxpy
+Pillow
+simplekml
