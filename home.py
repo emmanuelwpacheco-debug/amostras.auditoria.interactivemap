@@ -18,7 +18,7 @@ with col1:
     st.info("### 🚧 Amostragem de Campo")
     st.write("Geração de pontos aleatórios de coleta seguindo critérios do IBRAOP")
     if st.button("Abrir Módulo de Amostragem"):
-        st.switch_page("pages/1_Amostragem.py") # Comando para saltar de página
+        st.switch_page("pages/1_amostragem.py") # Comando para saltar de página
 
 with col2:
     st.success("### 📊 Relatórios de Auditoria")
