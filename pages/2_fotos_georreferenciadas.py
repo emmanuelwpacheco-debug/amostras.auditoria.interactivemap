@@ -58,30 +58,35 @@ if gpx_file and fotos:
     df_gps = processar_gpx(gpx_file)
     st.success(f"Tracklog processado: {len(df_gps)} pontos de GPS encontrados.")
 
-    if st.button("Sincronizar Fotos e Gerar KML"):
+   # --- LÓGICA DE GERAÇÃO KMZ ---
+if gpx_file and fotos:
+    df_gps = processar_gpx(gpx_file)
+    
+    if st.button("Sincronizar Fotos e Gerar KMZ"):
         kml = simplekml.Kml()
         encontrados = 0
         
-        progress_bar = st.progress(0)
-        for i, foto_file in enumerate(fotos):
+        for foto_file in fotos:
             dt_foto = extrair_data_foto(foto_file)
             
             if dt_foto:
-                # Busca o ponto GPS mais próximo no tempo (tolerância de 30s)
                 df_gps['diff'] = (df_gps['time'] - dt_foto).abs()
                 ponto_proximo = df_gps.sort_values('diff').iloc[0]
                 
                 if ponto_proximo['diff'].total_seconds() < 30:
-                    # Adiciona ao KML
+                    # 1. Salva a foto temporariamente para o KMZ conseguir "empacotar"
+                    # 2. Cria o ponto com a imagem embutida no balão de descrição
                     pnt = kml.newpoint(name=foto_file.name)
                     pnt.coords = [(ponto_proximo['lon'], ponto_proximo['lat'])]
-                    pnt.description = f"Foto tirada em: {dt_foto}\nSincronia GPS: {ponto_proximo['time']}"
+                    
+                    # Adiciona a imagem ao pacote KMZ
+                    path_no_kmz = kml.addfile(foto_file) 
+                    
+                    # Formatação HTML para a foto aparecer grande no Google Earth
+                    pnt.description = f'<![CDATA[<img src="{path_no_kmz}" width="400" /><br/>Data: {dt_foto}]]>'
                     encontrados += 1
-            
-            progress_bar.progress((i + 1) / len(fotos))
-
-        st.write(f"✅ Sucesso: {encontrados} fotos georreferenciadas com precisão.")
         
-        # Download do KML
-        kml_output = kml.kml()
-        st.download_button("📥 Baixar KML de Fotos", kml_output, "fotos_inspecao.kml")
+        # SALVAR COMO KMZ (Isso cria o pacote com as fotos dentro)
+        buf_kmz = io.BytesIO()
+        kml.savekmz(buf_kmz)
+        st.download_button("📥 Baixar KMZ com FOTOS", buf_kmz.getvalue(), "fotos_inspecao.kmz")
