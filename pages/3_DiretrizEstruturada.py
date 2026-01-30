@@ -5,89 +5,101 @@ import simplekml
 from pyproj import Transformer
 import io
 
-st.set_page_config(page_title="Diretriz Estruturada (Projeto)", layout="wide")
+st.set_page_config(page_title="Diretriz Estruturada", layout="wide")
 
-st.title("🛣️ Traçado de Diretriz de Projeto")
-st.markdown("Extração de coordenadas UTM e cotas (Z) a partir de tabelas de projeto em PDF.")
+st.title("🛣️ Diretriz Estruturada (Nota de Serviço)")
 
 # --- SIDEBAR ---
-st.sidebar.header("Configurações do Projeto")
-uploaded_pdf = st.sidebar.file_uploader("Upload do PDF de Locação", type=['pdf'])
-zona_utm = st.sidebar.number_input("Zona UTM (ex: 22 ou 23)", value=22, step=1)
-hemisferio = st.sidebar.selectbox("Hemisfério", ["Sul", "Norte"], index=0)
+st.sidebar.header("Configurações")
+uploaded_pdf = st.sidebar.file_uploader("Upload da Nota de Serviço (PDF)", type=['pdf'])
+zona_utm = st.sidebar.number_input("Zona UTM", value=23)
+hemisferio = st.sidebar.selectbox("Hemisfério", ["Sul", "Norte"])
 
-# --- FUNÇÕES TÉCNICAS ---
-def converter_utm_para_wgs(df, zona, hemis):
-    # Configura o conversor UTM -> WGS84
+# --- FUNÇÃO DE CONVERSÃO ---
+def converter_utm_para_wgs(df, zona, hemis, col_n, col_l):
     srid = f"+proj=utm +zone={zona} +{'south' if hemis == 'Sul' else 'north'} +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
     transformer = Transformer.from_crs(srid, "EPSG:4326")
     
-    # Aplica a conversão
-    lats, lons = transformer.transform(df['Easting (X)'].values, df['Northing (Y)'].values)
+    # Limpeza de strings (remove pontos de milhar e troca vírgula por ponto)
+    def limpar_num(val):
+        if not val: return 0.0
+        return float(str(val).replace('.', '').replace(',', '.'))
+
+    df['N_clean'] = df[col_n].apply(limpar_num)
+    df['L_clean'] = df[col_l].apply(limpar_num)
+    
+    lats, lons = transformer.transform(df['L_clean'].values, df['N_clean'].values)
     df['Latitude'] = lats
     df['Longitude'] = lons
     return df
 
-# --- LÓGICA PRINCIPAL ---
 if uploaded_pdf:
     with pdfplumber.open(uploaded_pdf) as pdf:
-        st.info(f"O PDF possui {len(pdf.pages)} páginas.")
+        total_pags = len(pdf.pages)
+        st.sidebar.info(f"Total de páginas: {total_pags}")
         
-        # Aqui o usuário deve indicar qual página contém a tabela para evitar processamento inútil
-        pag_alvo = st.number_input("Página da Tabela de Coordenadas", min_value=1, max_value=len(pdf.pages), value=1)
+        # Seleção de intervalo de páginas
+        p_ini, p_fim = st.sidebar.slider("Intervalo de páginas para extração", 1, total_pags, (1, total_pags))
         
-        table = pdf.pages[pag_alvo-1].extract_table()
+        dados_acumulados = []
         
-        if table:
-            df_projeto = pd.DataFrame(table[1:], columns=table[0]) # Assume que a primeira linha é o cabeçalho
-            st.write("### Prévia dos Dados Extraídos")
-            st.dataframe(df_projeto.head())
+        if st.button("🔍 Extrair Dados das Páginas Selecionadas"):
+            for i in range(p_ini - 1, p_fim):
+                page = pdf.pages[i]
+                table = page.extract_table()
+                if table:
+                    # Transformamos em DataFrame
+                    temp_df = pd.DataFrame(table)
+                    
+                    # Como a tabela tem cabeçalhos complexos, vamos renomear colunas pela posição
+                    # Olhando sua imagem: Estaca (col 4 e 5), Norte (col 6), Leste (col 7), Cota Terreno (col 8), Cota Projeto (col 9)
+                    # Nota: As posições podem variar levemente se houver colunas vazias detectadas
+                    dados_acumulados.append(temp_df)
             
-            # MAPEAMENTO DE COLUNAS (O usuário seleciona quais colunas são o quê)
-            cols = df_projeto.columns.tolist()
-            col_x = st.selectbox("Coluna do X (Easting)", cols)
-            col_y = st.selectbox("Coluna do Y (Northing)", cols)
-            col_z = st.selectbox("Coluna da Cota (Z)", cols)
-            col_estaca = st.selectbox("Coluna da Estaca/Nome", cols)
+            if dados_acumulados:
+                df_raw = pd.concat(dados_acumulados, ignore_index=True)
+                
+                st.write("### Identificação de Colunas")
+                st.warning("As tabelas de PDF podem vir com nomes genéricos (0, 1, 2...). Identifique as colunas corretas abaixo:")
+                
+                col_preview = st.columns(5)
+                cols_lista = df_raw.columns.tolist()
+                
+                with col_preview[0]: c_est = st.selectbox("Estaca", cols_lista, index=min(4, len(cols_lista)-1))
+                with col_preview[1]: c_nor = st.selectbox("Norte (Y)", cols_lista, index=min(6, len(cols_lista)-1))
+                with col_preview[2]: c_les = st.selectbox("Leste (X)", cols_lista, index=min(7, len(cols_lista)-1))
+                with col_preview[3]: c_cter = st.selectbox("Cota Terreno", cols_lista, index=min(8, len(cols_lista)-1))
+                with col_preview[4]: c_cproj = st.selectbox("Cota Projeto", cols_lista, index=min(9, len(cols_lista)-1))
 
-            if st.button("Gerar KML Estruturado"):
-                try:
-                    # Limpeza de dados (remover caracteres não numéricos)
-                    df_projeto[col_x] = pd.to_numeric(df_projeto[col_x].astype(str).str.replace(',', '.'), errors='coerce')
-                    df_projeto[col_y] = pd.to_numeric(df_projeto[col_y].astype(str).str.replace(',', '.'), errors='coerce')
-                    df_projeto[col_z] = pd.to_numeric(df_projeto[col_z].astype(str).str.replace(',', '.'), errors='coerce')
-                    df_projeto = df_projeto.dropna(subset=[col_x, col_y])
+                # Filtragem de linhas inválidas (cabeçalhos repetidos e linhas vazias)
+                df_limpo = df_raw[df_raw[c_nor].str.contains(r'\d', na=False)].copy()
+                
+                st.dataframe(df_limpo.head(15))
 
-                    # Renomeia para facilitar a função de conversão
-                    df_projeto = df_projeto.rename(columns={col_x: 'Easting (X)', col_y: 'Northing (Y)'})
-                    
-                    # Converte coordenadas
-                    df_final = converter_utm_para_wgs(df_projeto, zona_utm, hemisferio)
-                    
-                    # Criação do KML 3D
-                    kml = simplekml.Kml()
-                    ls = kml.newlinestring(name="Eixo do Projeto")
-                    
-                    coords_3d = []
-                    for _, row in df_final.iterrows():
-                        # Tupla (Longitude, Latitude, Altitude)
-                        coords_3d.append((row['Longitude'], row['Latitude'], row[col_z]))
+                if st.button("🛰️ Gerar KML 3D"):
+                    try:
+                        df_final = converter_utm_para_wgs(df_limpo, zona_utm, hemisferio, c_nor, c_les)
                         
-                        # Adiciona um ponto (placemark) para cada estaca
-                        pnt = kml.newpoint(name=str(row[col_estaca]))
-                        pnt.coords = [(row['Longitude'], row['Latitude'], row[col_z])]
-                        pnt.altitudemode = simplekml.AltitudeMode.absolute # Faz o ponto "flutuar" na cota real
+                        kml = simplekml.Kml()
+                        # Estilo para as estacas
+                        for _, row in df_final.iterrows():
+                            # Limpeza da Cota Projeto para o KML
+                            z = float(str(row[c_cproj]).replace(',', '.'))
+                            
+                            pnt = kml.newpoint(name=f"Estaca {row[c_est]}")
+                            pnt.coords = [(row['Longitude'], row['Latitude'], z)]
+                            pnt.altitudemode = simplekml.AltitudeMode.absolute
+                            pnt.description = f"Cota Terreno: {row[c_cter]}\nCota Projeto: {row[c_cproj]}"
 
-                    ls.coords = coords_3d
-                    ls.altitudemode = simplekml.AltitudeMode.absolute
-                    ls.style.linestyle.width = 3
-                    ls.style.linestyle.color = simplekml.Color.red
+                        # Linha do Eixo
+                        lin = kml.newlinestring(name="Eixo Projetado")
+                        lin.coords = [(r['Longitude'], r['Latitude'], float(str(r[c_cproj]).replace(',', '.'))) for _, r in df_final.iterrows()]
+                        lin.altitudemode = simplekml.AltitudeMode.absolute
+                        lin.style.linestyle.color = simplekml.Color.cyan
+                        lin.style.linestyle.width = 4
 
-                    # Download
-                    kml_str = kml.kml()
-                    st.download_button("📥 Baixar KML da Diretriz 3D", kml_str, "diretriz_projeto.kml")
-                    
-                except Exception as e:
-                    st.error(f"Erro no processamento: {e}")
-        else:
-            st.warning("Nenhuma tabela detectada na página selecionada.")
+                        buf = io.BytesIO()
+                        kml_str = kml.kml()
+                        st.download_button("📥 Baixar Diretriz KML", kml_str, "diretriz_projeto.kml")
+                    except Exception as e:
+                        st.error(f"Erro ao processar valores: {e}")
