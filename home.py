@@ -1,47 +1,32 @@
 import streamlit as st
 
-st.set_page_config(page_title="Sistema de Fiscalização Rodoviária", layout="wide")
+st.set_page_config(page_title="Sistema de Fiscalização", layout="wide")
 
-st.title("🏛️ Sistema de Acompanhamento de Fiscalização de obras rodoviárias")
+st.title("🏛️ Sistema de Auditoria Rodoviária")
 st.markdown("---")
 
-st.markdown("""
-### Bem-vinda, Auditora! / Bem-vindo, Auditor!
-Este sistema centraliza as ferramentas de apoio à fiscalização de obras rodoviárias. 
-Utilize o menu ao lado ou os cartões abaixo para navegar entre os módulos disponíveis.
-""")
+# Layout em colunas
+c1, c2 = st.columns(2)
 
-# Criando a malha de colunas para os cartões
-col1, col2 = st.columns(2)
-
-with col1:
-    st.info("### 🚧 Amostragem de Campo")
-    st.write("Geração de pontos aleatórios de coleta seguindo critérios do IBRAOP e análise de curvas.")
-    if st.button("Abrir Módulo de Amostragem"):
-        st.switch_page("pages/1_amostragem.py")
-
-with col2:
-    st.success("### 📸 Geotag de Fotos")
-    st.write("Sincronize fotos de inspeção com arquivos GPX para gerar KMZs com imagens embutidas.")
-    if st.button("Abrir Módulo de Fotos"):
-        st.switch_page("pages/2_fotos_georreferenciadas.py")
-
-st.markdown("---")
-
-# Segunda linha de colunas
-col3, col4 = st.columns(2)
-
-with col3:
-    st.warning("### 🛣️ Diretriz Estruturada")
-    st.write("Extração de coordenadas UTM e cotas de projeto a partir de tabelas em PDF para geração de KML 3D.")
-    if st.button("Abrir Diretriz Estruturada"):
+with c1:
+    st.subheader("🛣️ Diretriz de Projeto")
+    if st.button("Abrir Diretriz", key="btn_dire"):
         st.switch_page("pages/3_DiretrizEstruturada.py")
 
-with col4:
-    st.help("### 📊 Relatórios de Auditoria")
-    st.write("Módulo em desenvolvimento para consolidação de ensaios e medições automatizadas.")
-    # Botão desabilitado apenas como placeholder
-    st.button("Em breve...", disabled=True, key="btn_embreve")
+with c2:
+    st.subheader("🚧 Amostragem")
+    if st.button("Abrir Amostragem", key="btn_amo"):
+        st.switch_page("pages/1_amostragem.py")
 
-st.sidebar.markdown("---")
-st.sidebar.caption("Versão 1.2.0 - Gestão de Ativos")
+st.markdown("---")
+
+c3, c4 = st.columns(2)
+
+with c3:
+    st.subheader("📸 Fotos Geotag")
+    if st.button("Abrir Fotos", key="btn_foto"):
+        st.switch_page("pages/2_fotos_georreferenciadas.py")
+
+with c4:
+    st.subheader("📊 Relatórios")
+    st.button("Em breve", disabled=True, key="btn_rel")
