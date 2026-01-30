@@ -55,83 +55,85 @@ if st.session_state['df_projeto'] is not None:
     with c4: idx_cter = st.selectbox("Índice Cota Terreno", cols_idx, index=13)
     with c5: idx_cproj = st.selectbox("Índice Cota Projeto", cols_idx, index=14)
 
-    if st.button("🛰️ Processar e Visualizar no Mapa"):
-        try:
-            # Filtragem e Limpeza
-            df_limpo = df_raw[df_raw[idx_norte].str.contains(r'\d', na=False)].copy()
-            
-            def limpar_num(val):
-                if not val: return 0.0
-                return float(str(val).replace('.', '').replace(',', '.'))
-
-            srid = f"+proj=utm +zone={zona_utm} +{'south' if hemisferio == 'Sul' else 'north'} +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
-            transformer = Transformer.from_crs(srid, "EPSG:4326")
+    # ... (parte inicial do processamento igual)
             
             kml = simplekml.Kml()
             coords_para_kml = []
             lista_pontos_mapa = []
+            total_pontos = len(df_limpo)
 
-            for _, row in df_limpo.iterrows():
+            for i, (_, row) in enumerate(df_limpo.iterrows()):
                 n = limpar_num(row[idx_norte])
                 l = limpar_num(row[idx_leste])
                 z = limpar_num(row[idx_cproj])
-                estaca = f"{row[idx_estaca-1]} + {row[idx_estaca]}"
+                
+                # Tratamento da Estaca para exibição
+                parte_inteira = str(row[idx_estaca-1]).split('.')[0] # Remove decimais se houver
+                parte_metro = str(row[idx_estaca]).replace(',', '.')
+                estaca_label = f"{parte_inteira} + {parte_metro}"
                 
                 lat, lon = transformer.transform(l, n)
                 coords_para_kml.append((lon, lat, z))
                 
                 # Dados para o Mapa Interativo
                 lista_pontos_mapa.append({
-                    'lat': lat, 'lon': lon, 'estaca': estaca, 'z': z, 'terreno': row[idx_cter]
+                    'lat': lat, 'lon': lon, 'estaca': estaca_label, 'z': z, 'terreno': row[idx_cter]
                 })
                 
-                # Adicionar Ponto ao KML
-                pnt = kml.newpoint(name=f"Estaca {estaca}")
+                # --- LÓGICA DE LIMPEZA DO KML ---
+                # Só coloca Nome (Label) se for múltiplo de 10 ou se for a última estaca
+                try:
+                    e_multiplo_10 = int(parte_inteira) % 10 == 0
+                except:
+                    e_multiplo_10 = False
+
+                nome_ponto = estaca_label if (e_multiplo_10 or i == total_pontos - 1) else ""
+                
+                pnt = kml.newpoint(name=nome_ponto)
                 pnt.coords = [(lon, lat, z)]
                 pnt.altitudemode = simplekml.AltitudeMode.absolute
-                pnt.description = f"Cota Projeto: {z}m\nCota Terreno: {row[idx_cter]}m"
+                pnt.description = f"Estaca: {estaca_label}\nCota Projeto: {z}m\nCota Terreno: {row[idx_cter]}m"
+                
+                # Se não tiver nome, diminui o ícone para não poluir
+                if not nome_ponto:
+                    pnt.style.iconstyle.scale = 0.5 
 
-            # --- AQUI ESTÁ A LINHA 3D ---
+            # Linha 3D
             lin = kml.newlinestring(name="Eixo da Rodovia (3D)")
             lin.coords = coords_para_kml
             lin.altitudemode = simplekml.AltitudeMode.absolute
-            lin.style.linestyle.color = simplekml.Color.red # Vermelho
-            lin.style.linestyle.width = 5
+            lin.style.linestyle.color = simplekml.Color.red
+            lin.style.linestyle.width = 4
             
-            # Guardar resultados no estado
             st.session_state['df_processado'] = pd.DataFrame(lista_pontos_mapa)
             st.session_state['kml_data'] = kml.kml()
             
-            st.success("Processamento concluído!")
-
-        except Exception as e:
-            st.error(f"Erro: {e}")
-
-# --- EXIBIÇÃO DO MAPA E DOWNLOAD ---
+# --- EXIBIÇÃO DO MAPA ATUALIZADA ---
 if st.session_state['df_processado'] is not None:
     df_mapa = st.session_state['df_processado']
+    total = len(df_mapa)
     
     st.markdown("---")
     st.subheader("🗺️ Pré-visualização da Diretriz")
     
-    # Centralizar mapa na média das coordenadas
-    m = folium.Map(location=[df_mapa['lat'].mean(), df_mapa['lon'].mean()], zoom_start=15, control_scale=True)
+    m = folium.Map(location=[df_mapa['lat'].mean(), df_mapa['lon'].mean()], zoom_start=15)
     
-    # Desenhar a linha no mapa interativo (Folium)
-    pontos_linha = df_mapa[['lat', 'lon']].values.tolist()
-    folium.PolyLine(pontos_linha, color="red", weight=4, opacity=0.8).add_to(m)
+    # Desenha a linha completa
+    folium.PolyLine(df_mapa[['lat', 'lon']].values.tolist(), color="red", weight=3).add_to(m)
     
-    # Adicionar marcadores (apenas alguns para não travar o mapa se forem muitos)
+    # Lógica do Mapa: Mostrar 1º, último e múltiplos de 10
     for i, row in df_mapa.iterrows():
-        if i % 5 == 0: # Mostra uma estaca a cada 5 para manter performance
+        # Condição: Primeiro, Último ou Múltiplos de 10
+        deve_mostrar = (i == 0 or i == total - 1 or i % 10 == 0)
+        
+        if deve_mostrar:
             folium.CircleMarker(
                 location=[row['lat'], row['lon']],
-                radius=3,
+                radius=4,
                 popup=f"Estaca: {row['estaca']}<br>Cota: {row['z']}m",
-                color="blue",
+                color="blue" if i != total -1 else "green", # Último ponto em verde
                 fill=True
             ).add_to(m)
 
     st_folium(m, width=1100, height=500)
-    
-    st.download_button("📥 Baixar KML 3D (Eixo + Pontos)", st.session_state['kml_data'], "diretriz_projeto_3d.kml")
+    st.download_button("📥 Baixar KML Limpo", st.session_state['kml_data'], "diretriz_projeto_final.kml")
