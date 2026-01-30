@@ -7,7 +7,7 @@ st.markdown("---")
 
 st.markdown("""
 ### Bem-vinda, Auditora! / Bem-vindo, Auditor!
-Este sistema centraliza as ferramentas de apoio à fiscalização de obras rodoviárias.
+Este sistema centraliza as ferramentas de apoio à fiscalização de obras rodoviárias. 
 Utilize o menu ao lado ou os cartões abaixo para navegar entre os módulos disponíveis.
 """)
 
@@ -28,7 +28,7 @@ with col2:
 
 st.markdown("---")
 
-# Nova linha de colunas para o terceiro módulo
+# Segunda linha de colunas
 col3, col4 = st.columns(2)
 
 with col3:
@@ -40,8 +40,8 @@ with col3:
 with col4:
     st.help("### 📊 Relatórios de Auditoria")
     st.write("Módulo em desenvolvimento para consolidação de ensaios e medições automatizadas.")
-    if st.button("Ver Status", disabled=True):
-        pass
+    # Botão desabilitado apenas como placeholder
+    st.button("Em breve...", disabled=True, key="btn_embreve")
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Versão 1.2.0 - Gestão de Ativos")
