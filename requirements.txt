@@ -20,3 +20,4 @@ geopandas
 fiona
 openpyxl
 pykml
+lxml
