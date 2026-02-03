@@ -30,3 +30,11 @@ with c3:
 with c4:
     st.subheader("📊 Relatórios")
     st.button("Em breve", disabled=True, key="btn_rel")
+
+c5, c6 = st.columns(2)
+
+with col5:
+    st.error("### 🗺️ Inventário Rodoviário")
+    st.write("Filtre rodovias por tipo de revestimento e exporte relatórios em Excel/KML.")
+    if st.button("Abrir Inventário", key="btn_inv"):
+        st.switch_page("pages/4_InventarioRodoviario.py")
