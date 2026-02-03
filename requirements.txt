@@ -21,3 +21,4 @@ fiona
 openpyxl
 pykml
 lxml
+beautifulsoup4
