@@ -15,4 +15,8 @@ pyproj
 geopandas
 fiona
 openpyxl
-pyproj
+pandas
+geopandas
+fiona
+openpyxl
+pykml
