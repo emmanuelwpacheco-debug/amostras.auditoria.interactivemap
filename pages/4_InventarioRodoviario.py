@@ -9,11 +9,13 @@ import simplekml
 
 st.set_page_config(page_title="Inventário de Pavimento", layout="wide")
 
-# --- INICIALIZAÇÃO DO ESTADO ---
-if 'kmz_filtrado' not in st.session_state:
-    st.session_state['kmz_filtrado'] = None
-
 st.title("🗺️ Inventário e Exportador de KMZ (GO)")
+
+# Inicializa o estado para os botões não sumirem
+if 'dados_prontos' not in st.session_state:
+    st.session_state.dados_prontos = None
+if 'kmz_buffer' not in st.session_state:
+    st.session_state.kmz_buffer = None
 
 uploaded_file = st.sidebar.file_uploader("Carregar KMZ das Rodovias", type=['kmz'])
 
@@ -24,14 +26,30 @@ def extrair_tabela_goinfra(html_str):
     for tr in soup.find_all('tr'):
         tds = tr.find_all('td')
         if len(tds) >= 2:
-            chave = tds[0].get_text(strip=True).upper().replace(':', '')
+            chave = tds[0].get_text(strip=True).upper()
             valor = tds[1].get_text(strip=True)
             dados[chave] = valor
     return dados
 
-def parse_kmz_completo(file):
+def limpar_numero_br(valor):
+    """Converte '1.250,50' ou '1250.50' em float de forma segura"""
+    if pd.isna(valor) or valor == '': return 0.0
+    s = str(valor).strip().lower().replace('km', '')
+    # Se tiver vírgula e ponto, assume ponto como milhar (Padrão BR: 1.000,00)
+    if ',' in s and '.' in s:
+        s = s.replace('.', '')
+    s = s.replace(',', '.')
+    # Remove qualquer caractere que não seja número ou ponto
+    s = re.sub(r'[^\d.]', '', s)
     try:
-        with zipfile.ZipFile(file, 'r') as z:
+        return float(s)
+    except:
+        return 0.0
+
+@st.cache_data
+def processar_kmz(file_bytes):
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes), 'r') as z:
             kml_name = [n for n in z.namelist() if n.endswith('.kml')][0]
             with z.open(kml_name) as f:
                 tree = ET.parse(f)
@@ -39,98 +57,98 @@ def parse_kmz_completo(file):
         
         ns = {'kml': 'http://www.opengis.net/kml/2.2'}
         registros = []
-
         for pm in root.findall('.//kml:Placemark', ns):
             row = {}
             desc = pm.find('kml:description', ns)
             if desc is not None and desc.text:
                 row.update(extrair_tabela_goinfra(desc.text))
             
-            coords_tag = pm.find('.//kml:coordinates', ns)
-            if coords_tag is not None:
-                row['GEOMETRIA_RAW'] = coords_tag.text.strip()
+            coords = pm.find('.//kml:coordinates', ns)
+            if coords is not None:
+                row['GEOMETRIA_RAW'] = coords.text.strip()
             
             name = pm.find('kml:name', ns)
-            row['NOME_TRECHO'] = name.text if name is not None else "Sem Nome"
+            row['NOME_KML'] = name.text if name is not None else "S/N"
             if row: registros.append(row)
         return pd.DataFrame(registros)
     except Exception as e:
-        return f"Erro: {e}"
-
-def limpar_extensao(val):
-    if pd.isna(val): return 0.0
-    s = str(val).lower().replace('km', '').strip()
-    if '.' in s and ',' in s: s = s.replace('.', '')
-    s = s.replace(',', '.')
-    try: return float(re.sub(r'[^\d.]', '', s))
-    except: return 0.0
+        return str(e)
 
 if uploaded_file:
-    df_dados = parse_kmz_completo(uploaded_file)
+    # Lemos os bytes uma vez para o cache funcionar
+    file_bytes = uploaded_file.read()
+    df_dados = processar_kmz(file_bytes)
     
     if isinstance(df_dados, str):
-        st.error(df_dados)
+        st.error(f"Erro no processamento: {df_dados}")
     else:
         cols = [c for c in df_dados.columns if c != 'GEOMETRIA_RAW']
         
-        st.subheader("📊 Filtros e Quantificação")
+        st.subheader("🔍 Filtros")
         c1, c2, c3 = st.columns(3)
-        with c1: col_rev = st.selectbox("Pavimento", cols, index=0)
-        with c2: col_rod = st.selectbox("Rodovia", cols, index=0)
-        with c3: col_ext = st.selectbox("Extensão", cols, index=0)
+        with c1: col_rev = st.selectbox("Coluna Revestimento", cols, index=0)
+        with c2: col_rod = st.selectbox("Coluna Rodovia", cols, index=0)
+        with c3: col_ext = st.selectbox("Coluna Extensão", cols, index=0)
 
-        opcoes = sorted(df_dados[col_rev].unique().astype(str).tolist())
-        sel = st.multiselect("Filtrar Revestimento:", opcoes, default=opcoes)
+        tipos = sorted(df_dados[col_rev].unique().astype(str).tolist())
+        sel = st.multiselect("Selecionar Tipos:", tipos, default=tipos)
         
+        # Filtragem e Limpeza Matemática
         df_f = df_dados[df_dados[col_rev].isin(sel)].copy()
-        df_f['KM_NUM'] = df_f[col_ext].apply(limpar_extensao)
+        df_f['EXT_LIMPA'] = df_f[col_ext].apply(limpar_numero_br)
+        
+        total_km = df_f['EXT_LIMPA'].sum()
 
+        # Dashboard de métricas
         st.divider()
-        m1, m2 = st.columns(2)
-        m1.metric("Trechos Selecionados", len(df_f))
-        m2.metric("Extensão Total", f"{df_f['KM_NUM'].sum():.2f} km")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Trechos", len(df_f))
+        m2.metric("Extensão Total", f"{total_km:.2f} km")
+        m3.metric("Rodovias", df_f[col_rod].nunique())
 
-        st.dataframe(df_f.drop(columns=['GEOMETRIA_RAW', 'KM_NUM'], errors='ignore'), use_container_width=True)
+        st.dataframe(df_f.drop(columns=['GEOMETRIA_RAW', 'EXT_LIMPA'], errors='ignore'), use_container_width=True)
 
-        # --- SEÇÃO DE EXPORTAÇÃO ---
-        st.subheader("📥 Exportar Resultados")
-        exp1, exp2 = st.columns(2)
+        # --- SEÇÃO DE EXPORTAÇÃO (FORA DE BLOCOS CONDICIONAIS COMPLEXOS) ---
+        st.subheader("📥 Exportar")
+        col_btn1, col_btn2 = st.columns(2)
 
-        with exp1:
-            buffer_ex = io.BytesIO()
-            df_f.drop(columns=['GEOMETRIA_RAW', 'KM_NUM']).to_excel(buffer_ex, index=False)
-            st.download_button("📊 Baixar Excel (.xlsx)", buffer_ex.getvalue(), "inventario_go.xlsx", key="dl_excel")
+        # 1. Botão Excel
+        output_ex = io.BytesIO()
+        df_f.drop(columns=['GEOMETRIA_RAW', 'EXT_LIMPA'], errors='ignore').to_excel(output_ex, index=False)
+        col_btn1.download_button(
+            "📊 Baixar Planilha Excel", 
+            output_ex.getvalue(), 
+            "inventario_rodoviario.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
-        with exp2:
-            # Botão para PROCESSAR o KMZ
-            if st.button("🗺️ Processar KMZ Filtrado"):
-                with st.spinner("Gerando arquivo geográfico..."):
-                    try:
-                        kml_gen = simplekml.Kml()
-                        for _, row in df_f.iterrows():
-                            if pd.notna(row.get('GEOMETRIA_RAW')):
-                                lin = kml_gen.newlinestring(name=str(row[col_rod]))
-                                coords = []
-                                for c in row['GEOMETRIA_RAW'].split():
-                                    p = c.split(',')
-                                    if len(p) >= 2: coords.append((float(p[0]), float(p[1])))
-                                lin.coords = coords
-                                lin.description = f"Pavimento: {row[col_rev]}\nExtensão: {row[col_ext]}"
-                        
-                        kmz_out = io.BytesIO()
-                        with zipfile.ZipFile(kmz_out, 'w') as zf:
-                            zf.writestr("doc.kml", kml_gen.kml())
-                        
-                        st.session_state['kmz_filtrado'] = kmz_out.getvalue()
-                    except Exception as e:
-                        st.error(f"Erro na geração: {e}")
+        # 2. Botão KMZ
+        if col_btn2.button("🗺️ Gerar Arquivo KMZ"):
+            try:
+                kml = simplekml.Kml()
+                for _, r in df_f.iterrows():
+                    if pd.notna(r.get('GEOMETRIA_RAW')):
+                        ls = kml.newlinestring(name=str(r[col_rod]))
+                        # Converte string de coords em lista de tuplas (lon, lat)
+                        pts = []
+                        for coord_str in r['GEOMETRIA_RAW'].split():
+                            p = coord_str.split(',')
+                            if len(p) >= 2: pts.append((float(p[0]), float(p[1])))
+                        ls.coords = pts
+                        ls.description = f"Pavimento: {r[col_rev]} | Extensão: {r[col_ext]}"
+                
+                kmz_buf = io.BytesIO()
+                with zipfile.ZipFile(kmz_buf, 'w') as zf:
+                    zf.writestr("doc.kml", kml.kml())
+                st.session_state.kmz_buffer = kmz_buf.getvalue()
+                st.success("KMZ Gerado!")
+            except Exception as e:
+                st.error(f"Erro ao gerar mapa: {e}")
 
-            # Botão de DOWNLOAD (só aparece se o KMZ já foi processado no estado da sessão)
-            if st.session_state['kmz_filtrado'] is not None:
-                st.download_button(
-                    label="📥 Clique aqui para Baixar o KMZ",
-                    data=st.session_state['kmz_filtrado'],
-                    file_name="rodovias_filtradas.kmz",
-                    mime="application/vnd.google-earth.kmz",
-                    key="dl_kmz"
-                )
+        if st.session_state.kmz_buffer:
+            col_btn2.download_button(
+                "📥 Baixar KMZ Filtrado", 
+                st.session_state.kmz_buffer, 
+                "mapa_filtrado.kmz",
+                "application/vnd.google-earth.kmz"
+            )
