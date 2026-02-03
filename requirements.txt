@@ -12,3 +12,7 @@ Pillow
 simplekml
 pdfplumber
 pyproj
+geopandas
+fiona
+openpyxl
+pyproj
