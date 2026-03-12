@@ -15,7 +15,6 @@ pyproj
 geopandas
 fiona
 openpyxl
-pandas
 geopandas
 fiona
 openpyxl
@@ -23,7 +22,7 @@ pykml
 lxml
 beautifulsoup4
 pandas
-beautifulsoup4
 openpyxl
 lxml
 simplekml
+xlrd
