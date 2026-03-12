@@ -1,89 +1,69 @@
 import streamlit as st
 import pandas as pd
 import io
-import re
 
-st.set_page_config(page_title="Consolidação e Curva ABC", layout="wide")
+st.set_page_config(page_title="Consolidação ABC", layout="wide")
+st.title("📊 Scanner de Medições - GOINFRA")
 
-st.title("📊 Consolidação de Medições (Padrão GOINFRA)")
-
-uploaded_files = st.sidebar.file_uploader(
-    "Carregue as medições (Excel)", 
-    type=['xlsx', 'xls'], 
-    accept_multiple_files=True
-)
+uploaded_files = st.sidebar.file_uploader("Carregue os arquivos .xls", type=['xls', 'xlsx'], accept_multiple_files=True)
 
 if uploaded_files:
-    dfs_processados = []
-    
+    dfs = []
     for file in uploaded_files:
         try:
-           # O pandas usará 'xlrd' para .xls e 'openpyxl' para .xlsx automaticamente
-            df = pd.read_excel(file, skiprows=25)
+            # Lê o arquivo ignorando o topo administrativo
+            temp_df = pd.read_excel(file, skiprows=25)
             
-            # Limpa os nomes das colunas
-            df.columns = [str(c).strip().upper() for c in df.columns]
+            # REMOVE COLUNAS SEM NOME (comuns em células mescladas)
+            temp_df = temp_df.loc[:, ~temp_df.columns.str.contains('^Unnamed')]
             
-            # FILTRO DE SEGURANÇA: Só mantém linhas onde o 'CÓDIGO' existe
-            # Isso remove as células mescladas de títulos de grupos (ex: '1. SERVIÇOS INICIAIS')
-            col_codigo_nome = df.columns[0]
-            df = df.dropna(subset=[col_codigo_nome])
+            # Limpa espaços nos nomes das colunas
+            temp_df.columns = [str(c).strip() for c in temp_df.columns]
             
-            # Adiciona o nome do arquivo para controle
-            df['FONTE_MEDICAO'] = file.name
-            dfs_processados.append(df)
+            # Filtra apenas linhas que possuem código de serviço
+            col_primaria = temp_df.columns[0]
+            temp_df = temp_df.dropna(subset=[col_primaria])
+            
+            dfs.append(temp_df)
         except Exception as e:
             st.error(f"Erro ao ler {file.name}: {e}")
-    
-    if dfs_processados:
-        df_total = pd.concat(dfs_processados, ignore_index=True)
+
+    if dfs:
+        df_total = pd.concat(dfs, ignore_index=True)
         cols = df_total.columns.tolist()
 
         st.subheader("⚙️ Verifique o Mapeamento")
         c1, c2, c3, c4 = st.columns(4)
         
-        # Tentativa de pré-seleção baseada em palavras-chave
-        def auto_detect(options):
-            for i, c in enumerate(cols):
-                if any(opt in c for opt in options): return i
-            return 0
-
-        with c1: col_id = st.selectbox("Cód. Serviço", cols, index=auto_detect(['CÓDIGO', 'ITEM']))
-        with c2: col_desc = st.selectbox("Descrição", cols, index=auto_detect(['SERVIÇO', 'DESCRIÇÃO']))
-        with c3: col_qtd = st.selectbox("Qtd Medição", cols, index=auto_detect(['DA MEDIÇÃO', 'QTD']))
-        with c4: col_uni = st.selectbox("Preço Unitário", cols, index=auto_detect(['UNITÁRIO', 'VALOR U']))
+        # Seleção manual garantida
+        with c1: c_id = st.selectbox("Cód. Serviço", cols, index=0)
+        with c2: c_desc = st.selectbox("Descrição", cols, index=1 if len(cols)>1 else 0)
+        with c3: c_qtd = st.selectbox("Qtd Medição", cols, index=6 if len(cols)>6 else 0)
+        with c4: c_uni = st.selectbox("Preço Unitário", cols, index=4 if len(cols)>4 else 0)
 
         if st.button("📈 Gerar Relatório Consolidado"):
-            # Limpeza Numérica
-            df_total[col_qtd] = pd.to_numeric(df_total[col_qtd], errors='coerce').fillna(0)
-            df_total[col_uni] = pd.to_numeric(df_total[col_uni], errors='coerce').fillna(0)
+            # Força a conversão para número, removendo o que não for valor
+            df_total[c_qtd] = pd.to_numeric(df_total[c_qtd], errors='coerce').fillna(0)
+            df_total[c_uni] = pd.to_numeric(df_total[c_uni], errors='coerce').fillna(0)
             
-            # Consolidação
-            consolidado = df_total.groupby([col_id, col_desc, col_uni]).agg({
-                col_qtd: 'sum'
-            }).reset_index()
+            # Agrupamento
+            resumo = df_total.groupby([c_id, c_desc, c_uni]).agg({c_qtd: 'sum'}).reset_index()
+            resumo['TOTAL'] = resumo[c_qtd] * resumo[c_uni]
             
-            consolidado['VALOR_TOTAL'] = consolidado[col_qtd] * consolidado[col_uni]
+            # Filtra lixo (valores zerados) e ordena
+            abc = resumo[resumo['TOTAL'] > 0.01].sort_values('TOTAL', ascending=False)
             
-            # Ranking ABC
-            abc = consolidado[consolidado['VALOR_TOTAL'] > 0].sort_values(by='VALOR_TOTAL', ascending=False).copy()
-            total_geral = abc['VALOR_TOTAL'].sum()
-            abc['%_SIMPLES'] = (abc['VALOR_TOTAL'] / total_geral) * 100
-            abc['%_ACUMULADA'] = abc['%_SIMPLES'].cumsum()
-            abc['CLASSE'] = abc['%_ACUMULADA'].apply(lambda x: 'A' if x <= 80 else ('B' if x <= 95 else 'C'))
+            if not abc.empty:
+                total_geral = abc['TOTAL'].sum()
+                abc['% ACUM'] = (abc['TOTAL'] / total_geral).cumsum() * 100
+                abc['CLASSE'] = abc['% ACUM'].apply(lambda x: 'A' if x <= 80 else ('B' if x <= 95 else 'C'))
 
-            # Dashboard
-            st.divider()
-            m1, m2 = st.columns(2)
-            m1.metric("Total Acumulado", f"R$ {total_geral:,.2f}")
-            m2.metric("Itens Críticos (Classe A)", len(abc[abc['CLASSE'] == 'A']))
-
-            st.dataframe(abc, use_container_width=True)
-
-            # Exportação em duas abas
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                abc.to_excel(writer, sheet_name='Curva_ABC', index=False)
-                df_total.to_excel(writer, sheet_name='Itens_Detalhado', index=False)
-            
-            st.download_button("📥 Baixar Excel Consolidado", output.getvalue(), "Consolidado_ABC.xlsx")
+                st.metric("Total das Medições", f"R$ {total_geral:,.2f}")
+                st.dataframe(abc, use_container_width=True)
+                
+                # Exportação
+                output = io.BytesIO()
+                abc.to_excel(output, index=False)
+                st.download_button("📥 Baixar Excel", output.getvalue(), "curva_abc_consolidada.xlsx")
+            else:
+                st.warning("Nenhum dado válido encontrado. Verifique se as colunas selecionadas contêm valores numéricos.")
