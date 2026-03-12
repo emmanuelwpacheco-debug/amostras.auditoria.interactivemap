@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 
-st.set_page_config(page_title="Consolidação de medições e Curva ABC", layout="wide")
+st.set_page_config(page_title="Consolidação e Curva ABC", layout="wide")
 st.title("📊 Consolidação de Medições e Curva ABC")
 
 uploaded_files = st.sidebar.file_uploader(
@@ -12,94 +12,87 @@ uploaded_files = st.sidebar.file_uploader(
 )
 
 if uploaded_files:
-    # Lista para armazenar os dados de cada medição de forma organizada
     lista_consolidada = []
     
     for file in uploaded_files:
         try:
-            # Lendo a planilha (ajustado para o padrão de cabeçalho da imagem)
+            # Leitura ignorando o cabeçalho GOINFRA
             df = pd.read_excel(file, skiprows=25)
             
-            # Limpeza inicial de colunas fantasmas e nomes
+            # Limpeza de nomes de colunas
             df.columns = [str(c).strip() for c in df.columns]
             df = df.loc[:, ~df.columns.str.contains('Unnamed|nan', case=False)]
             
-            # Identificando as colunas principais (ajuste conforme a planilha)
-            # Geralmente: 0:Código, 1:Serviço, 2:Unidade, 3:Preço Unitário
-            col_cod = df.columns[0]
-            col_serv = df.columns[1]
-            col_unit = df.columns[4] # Valor Unitário
+            # Remove linhas sem código de serviço
+            df = df.dropna(subset=[df.columns[0]])
             
-            # Pegando a coluna de 'Quantidade da Medição' (ajustar índice se necessário)
-            # Na imagem padrão GOINFRA, costuma ser a coluna 'Da medição' sob 'Quantidades'
-            col_qtd_med = [c for c in df.columns if 'medição' in c.lower() and 'valor' not in c.lower()]
-            col_val_med = [c for c in df.columns if 'medição' in c.lower() and 'valor' in c.lower()]
-            
-            if col_qtd_med and col_val_med:
-                # Criando um DataFrame simplificado para esta medição específica
-                nome_med = file.name.replace('.xls', '').replace('.xlsx', '')
-                
-                temp = df[[col_cod, col_serv, col_unit, col_qtd_med[0], col_val_med[0]]].copy()
-                temp.columns = ['Código', 'Serviço', 'Preço Unitário', f'Qtd_{nome_med}', f'Valor_{nome_med}']
-                
-                # Convertendo para número
-                temp[f'Qtd_{nome_med}'] = pd.to_numeric(temp[f'Qtd_{nome_med}'], errors='coerce').fillna(0)
-                temp[f'Valor_{nome_med}'] = pd.to_numeric(temp[f'Valor_{nome_med}'], errors='coerce').fillna(0)
-                temp['Preço Unitário'] = pd.to_numeric(temp['Preço Unitário'], errors='coerce').fillna(0)
-                
-                # Remove linhas sem código (títulos de seções)
-                temp = temp.dropna(subset=['Código'])
-                lista_consolidada.append(temp)
-                
+            if not df.empty:
+                # Adicionamos o nome do arquivo para o usuário identificar
+                df['MEDICAO_FONTE'] = file.name.replace('.xls', '').replace('.xlsx', '')
+                lista_consolidada.append(df)
         except Exception as e:
-            st.error(f"Erro ao processar {file.name}: {e}")
+            st.error(f"Erro ao ler {file.name}: {e}")
 
     if lista_consolidada:
-        # Fazendo o Merge de todas as medições pelo Código e Serviço
-        df_final = lista_consolidada[0]
-        for i in range(1, len(lista_consolidada)):
-            df_final = pd.merge(
-                df_final, 
-                lista_consolidada[i], 
-                on=['Código', 'Serviço', 'Preço Unitário'], 
-                how='outer'
-            ).fillna(0)
+        # Unificamos tudo para permitir a seleção de colunas
+        df_bruto = pd.concat(lista_consolidada, ignore_index=True)
+        cols = df_bruto.columns.tolist()
 
-        # Calculando os Totais Acumulados
-        colunas_qtd = [c for c in df_final.columns if 'Qtd_' in c]
-        colunas_val = [c for c in df_final.columns if 'Valor_' in c]
+        st.subheader("⚙️ Configuração do Relatório")
+        st.info("Selecione as colunas correspondentes de uma das planilhas carregadas:")
         
-        df_final['Qtd Acumulada'] = df_final[colunas_qtd].sum(axis=1)
-        df_final['Valor Acumulado'] = df_final[colunas_val].sum(axis=1)
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: col_cod = st.selectbox("Código do Serviço", cols, index=0)
+        with c2: col_serv = st.selectbox("Descrição/Serviço", cols, index=1 if len(cols)>1 else 0)
+        with c3: col_qtd = st.selectbox("Coluna de Quantidade (Medição)", cols, index=len(cols)-3 if len(cols)>3 else 0)
+        with c4: col_val = st.selectbox("Coluna de Valor (Medição)", cols, index=len(cols)-2 if len(cols)>2 else 0)
 
-        # --- ABA 1: CONSOLIDAÇÃO DETALHADA ---
-        st.subheader("📋 Consolidação por Medição (Vista Sequencial)")
-        st.dataframe(df_final, use_container_width=True)
+        if st.button("🚀 Gerar Consolidação e ABC"):
+            try:
+                # 1. Criar a Tabela Sequencial (Pivot Table)
+                # Queremos ver: Código, Serviço e as quantidades/valores de cada arquivo
+                
+                # Convertendo para numérico antes de agrupar
+                df_bruto[col_qtd] = pd.to_numeric(df_bruto[col_qtd], errors='coerce').fillna(0)
+                df_bruto[col_val] = pd.to_numeric(df_bruto[col_val], errors='coerce').fillna(0)
 
-        # --- ABA 2: CURVA ABC ---
-        if st.button("📈 Gerar Curva ABC do Acumulado"):
-            abc = df_final[df_final['Valor Acumulado'] > 0].copy()
-            abc = abc[['Código', 'Serviço', 'Preço Unitário', 'Qtd Acumulada', 'Valor Acumulado']]
-            abc = abc.sort_values(by='Valor Acumulado', ascending=False)
-            
-            total_geral = abc['Valor Acumulado'].sum()
-            abc['% Simples'] = (abc['Valor Acumulado'] / total_geral) * 100
-            abc['% Acumulada'] = abc['% Simples'].cumsum()
-            abc['Classe'] = abc['% Acumulada'].apply(lambda x: 'A' if x <= 80 else ('B' if x <= 95 else 'C'))
-            
-            st.divider()
-            st.subheader("🏆 Classificação ABC (Total Acumulado)")
-            st.metric("Investimento Total Consolidado", f"R$ {total_geral:,.2f}")
-            st.dataframe(abc.style.format({'Preço Unitário': '{:.2f}', 'Valor Acumulado': '{:.2f}', '% Acumulada': '{:.2f}%'}), use_container_width=True)
+                # Criando a consolidação lado a lado
+                pivot_qtd = df_bruto.pivot_table(
+                    index=[col_cod, col_serv], 
+                    columns='MEDICAO_FONTE', 
+                    values=col_qtd, 
+                    aggfunc='sum'
+                ).reset_index()
+                
+                # Renomeando colunas para clareza
+                pivot_qtd.columns = [f"QTD_{c}" if c not in [col_cod, col_serv] else c for c in pivot_qtd.columns]
 
-            # Exportação
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_final.to_excel(writer, sheet_name='Consolidado_Sequencial', index=False)
-                abc.to_excel(writer, sheet_name='Curva_ABC', index=False)
-            
-            st.download_button(
-                "📥 Baixar Relatório Completo (Excel)", 
-                output.getvalue(), 
-                "consolidacao_fiscalizacao_GO.xlsx"
-            )
+                pivot_val = df_bruto.pivot_table(
+                    index=[col_cod, col_serv], 
+                    columns='MEDICAO_FONTE', 
+                    values=col_val, 
+                    aggfunc='sum'
+                ).reset_index()
+                
+                pivot_val.columns = [f"VALOR_{c}" if c not in [col_cod, col_serv] else c for c in pivot_val.columns]
+
+                # Mesclando as duas visões
+                df_final = pd.merge(pivot_qtd, pivot_val, on=[col_cod, col_serv])
+                
+                # Totais Acumulados
+                colunas_qtd = [c for c in df_final.columns if 'QTD_' in c]
+                colunas_val = [c for c in df_final.columns if 'VALOR_' in c]
+                
+                df_final['TOTAL_QUANTIDADE'] = df_final[colunas_qtd].sum(axis=1)
+                df_final['TOTAL_FINANCEIRO'] = df_final[colunas_val].sum(axis=1)
+
+                # --- EXIBIÇÃO ---
+                st.divider()
+                st.subheader("📋 Consolidação Sequencial")
+                st.dataframe(df_final, use_container_width=True)
+
+                # --- CURVA ABC ---
+                abc = df_final[df_final['TOTAL_FINANCEIRO'] > 0.01].copy()
+                abc = abc.sort_values(by='TOTAL_FINANCEIRO', ascending=False)
+                
+                total_geral = abc['TOTAL_
