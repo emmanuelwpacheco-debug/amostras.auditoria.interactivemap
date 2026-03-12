@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
 import io
+import re
 
 st.set_page_config(page_title="Consolidação e Curva ABC", layout="wide")
 
-st.title("📊 Scanner de Medições e Curva ABC")
+st.title("📊 Consolidação de Medições (Padrão GOINFRA)")
 
-# AJUSTE: Agora aceita .xlsx e .xls
 uploaded_files = st.sidebar.file_uploader(
     "Carregue as medições (Excel)", 
     type=['xlsx', 'xls'], 
@@ -18,45 +18,72 @@ if uploaded_files:
     
     for file in uploaded_files:
         try:
-            # Tenta ler pulando as 25 linhas de cabeçalho administrativo
+            # Pula as 25 linhas administrativas. A 26 é o cabeçalho.
             df = pd.read_excel(file, skiprows=25)
             
-            # Limpa nomes das colunas de espaços e quebras de linha
+            # Limpa os nomes das colunas
             df.columns = [str(c).strip().upper() for c in df.columns]
             
-            # Remove linhas que não possuem código de serviço (geralmente lixo ou subtotais)
-            if len(df.columns) > 0:
-                df = df.dropna(subset=[df.columns[0]])
-                dfs_processados.append(df)
+            # FILTRO DE SEGURANÇA: Só mantém linhas onde o 'CÓDIGO' existe
+            # Isso remove as células mescladas de títulos de grupos (ex: '1. SERVIÇOS INICIAIS')
+            col_codigo_nome = df.columns[0]
+            df = df.dropna(subset=[col_codigo_nome])
+            
+            # Adiciona o nome do arquivo para controle
+            df['FONTE_MEDICAO'] = file.name
+            dfs_processados.append(df)
         except Exception as e:
             st.error(f"Erro ao ler {file.name}: {e}")
     
     if dfs_processados:
-        df_unificado = pd.concat(dfs_processados, ignore_index=True)
-        st.success(f"{len(dfs_processados)} arquivos processados!")
+        df_total = pd.concat(dfs_processados, ignore_index=True)
+        cols = df_total.columns.tolist()
 
-        # Mapeamento dinâmico
-        cols = df_unificado.columns.tolist()
+        st.subheader("⚙️ Verifique o Mapeamento")
         c1, c2, c3, c4 = st.columns(4)
-        with c1: col_cod = st.selectbox("Código", cols, index=0)
-        with c2: col_serv = st.selectbox("Serviço", cols, index=1 if len(cols)>1 else 0)
-        with c3: col_qtd = st.selectbox("Qtd Medição", cols, index=6 if len(cols)>6 else 0)
-        with c4: col_prc = st.selectbox("Valor Unitário", cols, index=4 if len(cols)>4 else 0)
+        
+        # Tentativa de pré-seleção baseada em palavras-chave
+        def auto_detect(options):
+            for i, c in enumerate(cols):
+                if any(opt in c for opt in options): return i
+            return 0
 
-        if st.button("📈 Gerar Curva ABC"):
-            # Conversão e Cálculo
-            df_unificado[col_qtd] = pd.to_numeric(df_unificado[col_qtd], errors='coerce').fillna(0)
-            df_unificado[col_prc] = pd.to_numeric(df_unificado[col_prc], errors='coerce').fillna(0)
-            
-            # Agrupa por código e serviço
-            abc = df_unificado.groupby([col_cod, col_serv, col_prc]).agg({col_qtd: 'sum'}).reset_index()
-            abc['TOTAL'] = abc[col_qtd] * abc[col_prc]
-            abc = abc[abc['TOTAL'] > 0].sort_values(by='TOTAL', ascending=False)
-            
-            # Lógica ABC
-            total_geral = abc['TOTAL'].sum()
-            abc['%_ACUM'] = (abc['TOTAL'] / total_geral).cumsum() * 100
-            abc['CLASSE'] = abc['%_ACUM'].apply(lambda x: 'A' if x <= 80 else ('B' if x <= 95 else 'C'))
+        with c1: col_id = st.selectbox("Cód. Serviço", cols, index=auto_detect(['CÓDIGO', 'ITEM']))
+        with c2: col_desc = st.selectbox("Descrição", cols, index=auto_detect(['SERVIÇO', 'DESCRIÇÃO']))
+        with c3: col_qtd = st.selectbox("Qtd Medição", cols, index=auto_detect(['DA MEDIÇÃO', 'QTD']))
+        with c4: col_uni = st.selectbox("Preço Unitário", cols, index=auto_detect(['UNITÁRIO', 'VALOR U']))
 
-            st.metric("Valor Total Consolidado", f"R$ {total_geral:,.2f}")
+        if st.button("📈 Gerar Relatório Consolidado"):
+            # Limpeza Numérica
+            df_total[col_qtd] = pd.to_numeric(df_total[col_qtd], errors='coerce').fillna(0)
+            df_total[col_uni] = pd.to_numeric(df_total[col_uni], errors='coerce').fillna(0)
+            
+            # Consolidação
+            consolidado = df_total.groupby([col_id, col_desc, col_uni]).agg({
+                col_qtd: 'sum'
+            }).reset_index()
+            
+            consolidado['VALOR_TOTAL'] = consolidado[col_qtd] * consolidado[col_uni]
+            
+            # Ranking ABC
+            abc = consolidado[consolidado['VALOR_TOTAL'] > 0].sort_values(by='VALOR_TOTAL', ascending=False).copy()
+            total_geral = abc['VALOR_TOTAL'].sum()
+            abc['%_SIMPLES'] = (abc['VALOR_TOTAL'] / total_geral) * 100
+            abc['%_ACUMULADA'] = abc['%_SIMPLES'].cumsum()
+            abc['CLASSE'] = abc['%_ACUMULADA'].apply(lambda x: 'A' if x <= 80 else ('B' if x <= 95 else 'C'))
+
+            # Dashboard
+            st.divider()
+            m1, m2 = st.columns(2)
+            m1.metric("Total Acumulado", f"R$ {total_geral:,.2f}")
+            m2.metric("Itens Críticos (Classe A)", len(abc[abc['CLASSE'] == 'A']))
+
             st.dataframe(abc, use_container_width=True)
+
+            # Exportação em duas abas
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                abc.to_excel(writer, sheet_name='Curva_ABC', index=False)
+                df_total.to_excel(writer, sheet_name='Itens_Detalhado', index=False)
+            
+            st.download_button("📥 Baixar Excel Consolidado", output.getvalue(), "Consolidado_ABC.xlsx")
