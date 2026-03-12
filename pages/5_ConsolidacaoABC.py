@@ -18,7 +18,7 @@ if uploaded_files:
     
     for file in uploaded_files:
         try:
-            # Pula as 25 linhas administrativas. A 26 é o cabeçalho.
+           # O pandas usará 'xlrd' para .xls e 'openpyxl' para .xlsx automaticamente
             df = pd.read_excel(file, skiprows=25)
             
             # Limpa os nomes das colunas
