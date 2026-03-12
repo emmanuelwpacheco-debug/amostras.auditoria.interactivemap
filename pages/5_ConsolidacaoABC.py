@@ -37,7 +37,7 @@ if uploaded_files:
         df_total = pd.concat(dfs, ignore_index=True)
         cols = df_total.columns.tolist()
 
-        st.subheader("⚙️ Verifique o Mapeamento")
+        st.subheader("⚙️ Verifique o Mapeamento - O programa lê a planilha mas está sujeito a erros. Assim, criamos as colunas para o usuário conferir se o Python pegou os nomes certos. ")
         # Criamos as colunas para o usuário conferir se o Python pegou os nomes certos
         c1, c2, c3, c4 = st.columns(4)
         
@@ -45,7 +45,7 @@ if uploaded_files:
         with c2: c_desc = st.selectbox("Descrição", cols, index=1 if len(cols)>1 else 0)
         with c3: c_qtd = st.selectbox("Qtd Medição", cols, index=len(cols)-2 if len(cols)>2 else 0)
         with c4: c_uni = st.selectbox("Preço Unitário", cols, index=len(cols)-4 if len(cols)>4 else 0)
-
+        
         if st.button("📈 Gerar Relatório Consolidado"):
             # Conversão forçada para números
             df_total[c_qtd] = pd.to_numeric(df_total[c_qtd], errors='coerce').fillna(0)
