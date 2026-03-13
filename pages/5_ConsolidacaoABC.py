@@ -3,7 +3,7 @@ import pandas as pd
 import io
 
 st.set_page_config(page_title="Histórico Consolidado GOINFRA", layout="wide")
-st.title("📑 Consolidador de Histórico (Correção de Valores)")
+st.title("📑 Consolidador de Histórico (Correção Total de Soma)")
 
 uploaded_files = st.sidebar.file_uploader(
     "Carregue as medições na ordem cronológica (BM1, BM2...)", 
@@ -11,40 +11,14 @@ uploaded_files = st.sidebar.file_uploader(
     accept_multiple_files=True
 )
 
-def identificar_colunas_medicao(df):
-    """
-    Busca especificamente as colunas de Quantidade e Valor da Medição
-    considerando que ambas podem ter nomes parecidos.
-    """
-    cols = df.columns.tolist()
-    c_qtd, c_val = None, None
-    
-    # Procura as colunas que contêm 'DA MEDIÇÃO'
-    possiveis = [c for c in cols if 'DA MEDIÇÃO' in str(c).upper()]
-    
-    for p in possiveis:
-        # Geralmente a planilha GOINFRA coloca a Qtd antes do Valor
-        # ou diferencia por palavras chave no cabeçalho original
-        # Se houver duas colunas 'DA MEDIÇÃO', a primeira é Qtd e a segunda é Valor
-        # Mas vamos testar o tipo de dado predominante na coluna
-        amostra = df[p].dropna().head(10)
-        # Se for a coluna de valor, geralmente tem valores maiores ou decimais de moeda
-        if c_qtd is None:
-            c_qtd = p
-        else:
-            c_val = p
-            
-    return c_qtd, c_val
-
 if uploaded_files:
     try:
-        # 1. ESQUELETO (Orçamento Base)
+        # 1. ESQUELETO (Orçamento Base - Primeiro Arquivo)
         primeiro = uploaded_files[0]
         df_base = pd.read_excel(primeiro, skiprows=25)
         df_base.columns = [str(c).strip().upper() for c in df_base.columns]
         df_base = df_base.loc[:, ~df_base.columns.str.contains('UNNAMED|NAN', case=False)]
         
-        # Colunas Fixas
         c_cod = df_base.columns[0]
         c_serv = df_base.columns[1]
         c_unid = next((c for c in df_base.columns if 'UNID' in c), df_base.columns[2])
@@ -66,57 +40,66 @@ if uploaded_files:
             
             nome_bm = file.name.split('.')[0]
             
-            # Localização manual precisa das colunas 'DA MEDIÇÃO'
-            # Na GOINFRA: Coluna 6 aprox é Qtd, Coluna 9 aprox é Valor (índices 5 e 8)
-            # Vamos usar uma lógica de exclusão:
-            cols_da_medicao = [i for i, c in enumerate(df_bm.columns) if 'DA MEDIÇÃO' in c]
+            # --- LÓGICA DE CAPTURA DE COLUNAS POR NOME ---
+            # Identifica todas as colunas "DA MEDIÇÃO"
+            cols_medicao = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
             
-            if len(cols_da_medicao) >= 2:
-                idx_qtd = cols_da_medicao[0]
-                idx_val = cols_da_medicao[1]
-            else:
-                # Caso as colunas tenham nomes diferentes
-                idx_qtd = 5 # Posição padrão Qtd
-                idx_val = 8 # Posição padrão Valor
-            
-            c_k0 = next((i for i, c in enumerate(df_bm.columns) if 'FATOR' in c or 'K0' in c), 10)
-            c_reaj = next((i for i, c in enumerate(df_bm.columns) if 'REAJUSTE' in c), 11)
+            # Identifica a coluna de Reajuste (procurando o termo exato ou parcial)
+            col_reajuste_nome = next((c for c in df_bm.columns if 'REAJUSTE' in c or 'REAJUSTAMENTO' in c), None)
+            col_k0_nome = next((c for c in df_bm.columns if 'K0' in c or 'FATOR' in c or '(K)' in c), None)
 
-            # Extração forçada pelos índices das colunas detectadas
             med_temp = pd.DataFrame(index=df_bm.index)
-            med_temp[f'QTD_{nome_bm}'] = pd.to_numeric(df_bm.iloc[:, idx_qtd], errors='coerce').fillna(0)
-            med_temp[f'VALOR_{nome_bm}'] = pd.to_numeric(df_bm.iloc[:, idx_val], errors='coerce').fillna(0)
-            med_temp[f'K0_{nome_bm}'] = df_bm.iloc[:, c_k0].fillna(1.0)
-            med_temp[f'REAJ_{nome_bm}'] = pd.to_numeric(df_bm.iloc[:, c_reaj], errors='coerce').fillna(0)
+
+            # Quantidade (Normalmente a primeira "Da Medição")
+            if len(cols_medicao) >= 1:
+                med_temp[f'QTD_{nome_bm}'] = pd.to_numeric(df_bm[cols_medicao[0]], errors='coerce').fillna(0)
             
+            # Valor (Normalmente a segunda "Da Medição")
+            if len(cols_medicao) >= 2:
+                med_temp[f'VALOR_{nome_bm}'] = pd.to_numeric(df_bm[cols_medicao[1]], errors='coerce').fillna(0)
+            
+            # Reajustamento (Busca pelo nome identificado)
+            if col_reajuste_nome:
+                med_temp[f'REAJ_{nome_bm}'] = pd.to_numeric(df_bm[col_reajuste_nome], errors='coerce').fillna(0)
+            else:
+                med_temp[f'REAJ_{nome_bm}'] = 0.0
+
+            # Fator K0
+            if col_k0_nome:
+                med_temp[f'K0_{nome_bm}'] = df_bm[col_k0_nome].fillna(1.0)
+            
+            # Unir ao resultado principal
             resultado = resultado.join(med_temp)
             
         except Exception as e:
             st.warning(f"Atenção no arquivo {file.name}: {e}")
 
-    # 3. CONSOLIDAÇÃO FINAL
+    # 3. CONSOLIDAÇÃO FINAL E SOMAS
     resultado = resultado.fillna(0)
     
-    # Somatórios
+    # Listar colunas para soma
     c_qtds = [c for c in resultado.columns if 'QTD_' in c]
     c_vals = [c for c in resultado.columns if 'VALOR_' in c]
     c_reajs = [c for c in resultado.columns if 'REAJ_' in c]
 
+    # Somas Acumuladas
     resultado['QTD_ACUMULADA'] = resultado[c_qtds].sum(axis=1)
     resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
     resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
-    resultado['VALOR_GLOBAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
+    
+    # VALOR GLOBAL (Principal + Reajuste)
+    resultado['TOTAL_GLOBAL_ACUM'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
 
-    # Estilização para Unidades Construtivas
+    # Estilização das Unidades Construtivas
     def style_rows(row):
         if row['PRECO_UNIT'] == 0:
-            return ['background-color: #f0f2f6; font-weight: bold'] * len(row)
+            return ['background-color: #f0f2f6; font-weight: bold; color: #0e1117'] * len(row)
         return [''] * len(row)
 
-    st.subheader("✅ Histórico Consolidado (Valores Corrigidos)")
+    st.subheader("✅ Histórico Consolidado (Conferência de Reajuste)")
     st.dataframe(resultado.style.apply(style_rows, axis=1), use_container_width=True)
     
     # Download
     output = io.BytesIO()
     resultado.to_excel(output, index=False)
-    st.download_button("📥 Baixar Planilha Consolidada", output.getvalue(), "historico_finedigno_v2.xlsx")
+    st.download_button("📥 Baixar Planilha de Histórico", output.getvalue(), "historico_consolidado_reajuste.xlsx")
