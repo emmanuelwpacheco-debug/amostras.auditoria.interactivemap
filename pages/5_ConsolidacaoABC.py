@@ -2,110 +2,108 @@ import streamlit as st
 import pandas as pd
 import io
 
-st.set_page_config(page_title="Consolidador de Histórico", layout="wide")
-st.title("📑 Consolidador de Histórico Acumulado e Aditivos")
+st.set_page_config(page_title="Histórico de Medições GOINFRA", layout="wide")
+st.title("📑 Consolidador de Histórico Acumulado (Orçamento + Aditivos)")
 
 uploaded_files = st.sidebar.file_uploader(
-    "Carregue as medições (ordene pela data de ocorrência)", 
+    "Carregue as medições (Siga a ordem cronológica: BM1, BM2...)", 
     type=['xls', 'xlsx'], 
     accept_multiple_files=True
 )
 
+def formatar_colunas(df):
+    """Limpa nomes de colunas para evitar erros de busca"""
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    return df.loc[:, ~df.columns.str.contains('UNNAMED|NAN', case=False)]
+
 if uploaded_files:
-    # Dicionário para armazenar os dados de cada Boletim de Medição (BM)
-    bms = {}
-    colunas_base = ['CÓDIGO', 'SERVIÇO', 'UNIDADE', 'PREÇO UNITÁRIO', 'QUANTIDADE TOTAL']
-    
+    dados_bms = {}
+    ordem_arquivos = []
+
     for file in uploaded_files:
         try:
-            # Leitura a partir da linha 26 (padrão GOINFRA)
+            # Leitura padrão GOINFRA
             df = pd.read_excel(file, skiprows=25)
+            df = formatar_colunas(df)
             
-            # Limpeza de colunas
-            df.columns = [str(c).strip().upper() for c in df.columns]
-            df = df.loc[:, ~df.columns.str.contains('UNNAMED|NAN', case=False)]
+            nome_bm = file.name.split('.')[0]
+            ordem_arquivos.append(nome_bm)
             
-            # Identificação das colunas críticas
-            # Adaptamos para buscar nomes que contenham as palavras-chave
-            def buscar_col(termos):
-                for c in df.columns:
-                    if any(t in c for t in termos): return c
-                return None
+            # Mapeamento manual para evitar o erro '[None] not in index'
+            # Se não achar o nome exato, pegamos pela posição (mais seguro)
+            col_cod = df.columns[0]
+            col_serv = df.columns[1]
+            col_unid = df.columns[2]
+            col_precu = df.columns[3]
+            col_qtd_orc = df.columns[4]
+            
+            # Procurando as colunas de medição (geralmente as últimas)
+            # Buscamos palavras-chave para ser flexível
+            col_qtd_med = next((c for c in df.columns if "DA MEDIÇÃO" in c and "VALOR" not in c), df.columns[5])
+            col_val_med = next((c for c in df.columns if "DA MEDIÇÃO" in c and "VALOR" in c), df.columns[8])
+            col_k0 = next((c for c in df.columns if "FATOR(K)" in c or "K0" in c), df.columns[10])
+            col_reaj = next((c for c in df.columns if "REAJUSTE" in c), df.columns[11])
 
-            c_cod = buscar_col(['CÓDIGO', 'ITEM'])
-            c_serv = buscar_col(['SERVIÇO', 'DESCRIÇÃO'])
-            c_unid = buscar_col(['UNIDADE', 'UNID'])
-            c_pre = buscar_col(['PREÇO UNITÁRIO', 'VALOR UNIT'])
-            c_qtd_orc = buscar_col(['QUANTIDADE', 'QTD. ORC'])
+            # Criando DataFrame padronizado para esta BM
+            df_temp = df[[col_cod, col_serv, col_unid, col_precu, col_qtd_orc, col_qtd_med, col_val_med, col_k0, col_reaj]].copy()
+            df_temp.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC', 
+                               f'QTD_{nome_bm}', f'VALOR_{nome_bm}', f'K0_{nome_bm}', f'REAJ_{nome_bm}']
             
-            # Colunas da Medição Atual
-            c_qtd_bm = buscar_col(['DA MEDIÇÃO', 'QTD. MED'])
-            c_val_bm = buscar_col(['VALOR DA MED', 'VALOR MED'])
-            c_k0 = buscar_col(['K0', 'FATOR'])
-            c_reaj = buscar_col(['REAJUSTE'])
-
-            # Nome simplificado do BM baseado no arquivo
-            nome_bm = file.name.replace('.xls', '').replace('.xlsx', '')
-
-            # Seleção e renomeação para padronização
-            df_bm = df[[c_cod, c_serv, c_unid, c_pre, c_qtd_orc, c_qtd_bm, c_val_bm, c_k0, c_reaj]].copy()
-            df_bm.columns = ['CÓDIGO', 'SERVIÇO', 'UNIDADE', 'PREÇO UNITÁRIO', 'QTD_ORC', 
-                             f'QTD_{nome_bm}', f'VALOR_{nome_bm}', f'K0_{nome_bm}', f'REAJ_{nome_bm}']
-            
-            bms[nome_bm] = df_bm
+            dados_bms[nome_bm] = df_temp
             
         except Exception as e:
-            st.error(f"Erro no arquivo {file.name}: {e}")
+            st.error(f"Erro ao processar {file.name}: {e}")
 
-    if bms:
-        # 1. Criar a Lista Mestre de Serviços (Unificando Aditivos)
-        # Concatenamos todos os códigos e serviços encontrados em todos os arquivos
-        lista_mestre = pd.concat([df[['CÓDIGO', 'SERVIÇO', 'UNIDADE', 'PREÇO UNITÁRIO', 'QTD_ORC']] for df in bms.values()])
-        # Remove duplicatas mantendo a última definição (útil se o preço mudar por aditivo)
-        lista_mestre = lista_mestre.drop_duplicates(subset=['CÓDIGO', 'SERVIÇO'], keep='last')
+    if dados_bms:
+        # 1. CONSTRUÇÃO DA BASE (ORÇAMENTO)
+        # Usamos o primeiro arquivo como referência de estrutura (inclusive títulos)
+        primeira_bm = ordem_arquivos[0]
+        base_df = dados_bms[primeira_bm][['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']].copy()
 
-        # 2. Unir cada BM à Lista Mestre (Merge)
-        df_final = lista_mestre
-        for nome_bm, df_bm in bms.items():
-            # Pegamos apenas as colunas específicas daquela medição
-            colunas_medicao = ['CÓDIGO', 'SERVIÇO', f'QTD_{nome_bm}', f'VALOR_{nome_bm}', f'K0_{nome_bm}', f'REAJ_{nome_bm}']
-            df_final = pd.merge(df_final, df_bm[colunas_medicao], on=['CÓDIGO', 'SERVIÇO'], how='left')
+        # 2. ADIÇÃO DE ITENS DE ADITIVOS (Sincronização)
+        for nome in ordem_arquivos[1:]:
+            df_atual = dados_bms[nome]
+            # Verifica se existem códigos novos que não estão na base
+            novos_itens = df_atual[~df_atual['COD'].isin(base_df['COD'])][['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']]
+            if not novos_itens.empty:
+                base_df = pd.concat([base_df, novos_itens], ignore_index=True)
 
-        # 3. Cálculos de Acumulado
-        col_qtds = [c for c in df_final.columns if 'QTD_' in c and 'ORC' not in c]
-        col_vals = [c for c in df_final.columns if 'VALOR_' in c]
-        col_reaj = [c for c in df_final.columns if 'REAJ_' in c]
+        # 3. MERGE DOS VALORES DE CADA BM
+        resultado_final = base_df
+        for nome in ordem_arquivos:
+            cols_interesse = ['COD', 'SERVICO', f'QTD_{nome}', f'VALOR_{nome}', f'K0_{nome}', f'REAJ_{nome}']
+            resultado_final = pd.merge(resultado_final, dados_bms[nome][cols_interesse], on=['COD', 'SERVICO'], how='left')
 
-        df_final = df_final.fillna(0) # Transforma vazios em 0 para somar
+        # 4. CÁLCULO DOS ACUMULADOS
+        resultado_final = resultado_final.fillna(0)
         
-        df_final['QUANTIDADE ACUMULADA'] = df_final[col_qtds].sum(axis=1)
-        df_final['VALOR ACUMULADO'] = df_final[col_vals].sum(axis=1)
-        df_final['VALOR REAJUSTE ACUMULADO'] = df_final[col_reaj].sum(axis=1)
+        c_qtds = [c for c in resultado_final.columns if 'QTD_' in c and 'ORC' not in c]
+        c_vals = [c for c in resultado_final.columns if 'VALOR_' in c]
+        c_reajs = [c for c in resultado_final.columns if 'REAJ_' in c]
 
-        # 4. Tratamento de Unidades Construtivas
-        # Se Qtd, Unid e Preço são 0, é uma linha de grupo
-        def marcar_grupo(row):
-            if str(row['UNIDADE']) in ['0', 'nan', ''] and row['PREÇO UNITÁRIO'] == 0:
-                return "📂 GRUPO"
-            return "🔧 SERVIÇO"
-        
-        df_final['TIPO'] = df_final.apply(marcar_grupo, axis=1)
+        resultado_final['QTD_ACUMULADA'] = resultado_final[c_qtds].sum(axis=1)
+        resultado_final['VALOR_ACUMULADO'] = resultado_final[c_vals].sum(axis=1)
+        resultado_final['VALOR_REAJUSTE_ACUMULADO'] = resultado_final[c_reajs].sum(axis=1)
 
         # --- EXIBIÇÃO ---
-        st.subheader("📊 Histórico Acumulado Consolidado")
-        st.write("A tabela abaixo reflete todos os serviços, incluindo aditivos detectados.")
+        st.subheader("📋 Histórico Consolidado (Estrutura Completa)")
+        st.write("Linhas sem Unidade e Preço são tratadas como Unidades Construtivas (Grupos).")
         
-        # Estilização básica
-        st.dataframe(df_final, use_container_width=True)
+        # Mostra a tabela (usando estilo para facilitar leitura de grupos)
+        def highlight_groups(s):
+            return ['background-color: #f0f2f6; font-weight: bold' if s.UNID == 0 else '' for _ in s]
 
-        # Download
+        st.dataframe(resultado_final, use_container_width=True)
+
+        # Exportação
         output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_final.to_excel(writer, index=False, sheet_name='Historico_Acumulado')
-        
-        st.download_button(
-            "📥 Baixar Histórico Completo", 
-            output.getvalue(), 
-            "historico_consolidado_obras.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        resultado_final.to_excel(output, index=False)
+        st.download_button("📥 Baixar Planilha de Histórico", output.getvalue(), "historico_consolidado.xlsx")
+
+        # --- CURVA ABC (Apenas Serviços) ---
+        if st.checkbox("Ver Curva ABC do Acumulado (Exclui Grupos)"):
+            abc = resultado_final[resultado_final['PRECO_UNIT'] > 0].copy()
+            abc = abc.sort_values('VALOR_ACUMULADO', ascending=False)
+            total = abc['VALOR_ACUMULADO'].sum()
+            abc['%_ACUM'] = (abc['VALOR_ACUMULADO'] / total).cumsum() * 100
+            st.dataframe(abc[['COD', 'SERVICO', 'VALOR_ACUMULADO', '%_ACUM']], use_container_width=True)
