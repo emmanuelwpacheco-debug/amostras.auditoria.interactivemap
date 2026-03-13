@@ -44,6 +44,7 @@ if uploaded_files:
         eng_m = 'xlrd' if ultimo_item['file'].name.endswith('.xls') else 'openpyxl'
         df_m = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
         
+        # Corte dinâmico no final do orçamento
         linha_corte = df_m[df_m.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
         if not linha_corte.empty:
             df_m = df_m.iloc[:linha_corte[0]]
@@ -60,16 +61,18 @@ if uploaded_files:
         resultado = df_m[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
         resultado.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
         
-        # Criamos a CHAVE MESTRA (Código + Serviço) para o join não depender da posição da linha
-        resultado['CHAVE_JOIN'] = resultado['COD'].astype(str).strip() + resultado['SERVICO'].astype(str).strip()
-        # Guardamos a ordem original para re-exibir corretamente ao final
+        # CORREÇÃO DA CHAVE: Convertendo para string antes de usar .str.strip()
+        resultado['CHAVE_JOIN'] = (
+            resultado['COD'].astype(str).str.strip() + 
+            resultado['SERVICO'].astype(str).str.strip()
+        )
         resultado['ORDEM_ORIGINAL'] = range(len(resultado))
         
     except Exception as e:
         st.error(f"Erro na estrutura mestre: {e}")
         st.stop()
 
-    # 2. Integração de Dados por "Matching" de Código/Serviço
+    # 2. Integração de Dados por "Matching"
     for item in processados:
         try:
             eng = 'xlrd' if item['file'].name.endswith('.xls') else 'openpyxl'
@@ -77,12 +80,14 @@ if uploaded_files:
             df_bm.columns = [str(c).strip().upper() for c in df_bm.columns]
             label = item['label']
             
-            # Localizar colunas
             cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
             c_reaj = next((c for c in df_bm.columns if 'REAJUSTE' in c or 'REAJUSTAMENTO' in c), None)
             
-            # Criar chave no arquivo da medição atual
-            df_bm['CHAVE_JOIN'] = df_bm.iloc[:, 0].astype(str).strip() + df_bm.iloc[:, 1].astype(str).strip()
+            # Criar chave no arquivo da medição atual (mesma lógica robusta)
+            df_bm['CHAVE_JOIN'] = (
+                df_bm.iloc[:, 0].astype(str).str.strip() + 
+                df_bm.iloc[:, 1].astype(str).str.strip()
+            )
             
             med_cols = pd.DataFrame()
             med_cols['CHAVE_JOIN'] = df_bm['CHAVE_JOIN']
@@ -93,16 +98,15 @@ if uploaded_files:
             if c_reaj:
                 med_cols[f'REAJ_{label}'] = pd.to_numeric(df_bm[c_reaj], errors='coerce').fillna(0)
             
-            # O join agora é 'left' (quem manda é o esqueleto mestre) e baseado na chave do serviço
+            # Remove duplicatas da medição para não inflar o merge
+            med_cols = med_cols.drop_duplicates(subset=['CHAVE_JOIN'])
+            
             resultado = pd.merge(resultado, med_cols, on='CHAVE_JOIN', how='left')
             
         except Exception as e:
             st.warning(f"Erro no matching do arquivo {item['file'].name}: {e}")
 
-    # 3. Consolidação e Limpeza
-    # Remove duplicatas de join se houver (segurança)
-    resultado = resultado.drop_duplicates(subset=['CHAVE_JOIN'], keep='first')
-    # Ordena de volta para a estrutura fidedigna do orçamento
+    # 3. Consolidação Final
     resultado = resultado.sort_values('ORDEM_ORIGINAL').drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL']).fillna(0)
     
     c_qtds = [c for c in resultado.columns if 'QTD_' in c]
@@ -135,7 +139,6 @@ if uploaded_files:
     
     if not abc.empty:
         abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
-        
         total_pi_abc = abc['VALOR_ACUMULADO'].sum()
         total_reajuste_abc = abc['REAJUSTE_ACUMULADO'].sum()
         total_global_abc = abc['TOTAL_GERAL'].sum()
@@ -143,12 +146,7 @@ if uploaded_files:
         abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_global_abc) * 100
         abc['%_ACUMULADO'] = abc['%_SIMPLES'].cumsum()
         
-        def classificar_abc(porc):
-            if porc <= 80.01: return 'A'
-            if porc <= 95.01: return 'B'
-            return 'C'
-        
-        abc['CLASSE'] = abc['%_ACUMULADO'].apply(classificar_abc)
+        abc['CLASSE'] = abc['%_ACUMULADO'].apply(lambda p: 'A' if p <= 80.01 else ('B' if p <= 95.01 else 'C'))
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Serviços (PI)", f"R$ {formatar_br(total_pi_abc)}")
