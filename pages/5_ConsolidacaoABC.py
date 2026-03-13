@@ -2,52 +2,78 @@ import streamlit as st
 import pandas as pd
 import io
 
-st.set_page_config(page_title="Histórico de Medições GOINFRA", layout="wide")
-st.title("📑 Consolidador de Histórico Acumulado (Orçamento + Aditivos)")
+st.set_page_config(page_title="Histórico Consolidado GOINFRA", layout="wide")
+st.title("📑 Consolidador de Histórico e Unidades Construtivas")
 
 uploaded_files = st.sidebar.file_uploader(
-    "Carregue as medições (Siga a ordem cronológica: BM1, BM2...)", 
+    "Carregue as medições (Siga a ordem BM1, BM2...)", 
     type=['xls', 'xlsx'], 
     accept_multiple_files=True
 )
 
-def formatar_colunas(df):
-    """Limpa nomes de colunas para evitar erros de busca"""
-    df.columns = [str(c).strip().upper() for c in df.columns]
-    return df.loc[:, ~df.columns.str.contains('UNNAMED|NAN', case=False)]
+def identificar_coluna(lista_cols, termos):
+    """Retorna o nome da coluna que contém um dos termos pesquisados"""
+    for col in lista_cols:
+        if any(termo in str(col).upper() for termo in termos):
+            return col
+    return None
 
 if uploaded_files:
     dados_bms = {}
-    ordem_arquivos = []
+    ordem_bms = []
 
     for file in uploaded_files:
         try:
-            # Leitura padrão GOINFRA
+            # Lendo a partir da linha 26 (Cabeçalho dos serviços)
             df = pd.read_excel(file, skiprows=25)
-            df = formatar_colunas(df)
             
-            nome_bm = file.name.split('.')[0]
-            ordem_arquivos.append(nome_bm)
+            # Limpeza de nomes de colunas e remoção de colunas vazias
+            df.columns = [str(c).strip().upper() for c in df.columns]
+            df = df.loc[:, ~df.columns.str.contains('UNNAMED|NAN', case=False)]
             
-            # Mapeamento manual para evitar o erro '[None] not in index'
-            # Se não achar o nome exato, pegamos pela posição (mais seguro)
-            col_cod = df.columns[0]
-            col_serv = df.columns[1]
-            col_unid = df.columns[2]
-            col_precu = df.columns[3]
-            col_qtd_orc = df.columns[4]
+            # Mapeamento Dinâmico (Evita o erro de index out of bounds)
+            c_cod  = df.columns[0] # Código é sempre a primeira
+            c_serv = df.columns[1] # Serviço é sempre a segunda
+            c_unid = identificar_coluna(df.columns, ['UNID'])
+            c_precu = identificar_coluna(df.columns, ['PREÇO UNIT', 'UNITÁRIO'])
+            c_qtd_orc = identificar_coluna(df.columns, ['CONTRATADA', 'QTD. ORC'])
             
-            # Procurando as colunas de medição (geralmente as últimas)
-            # Buscamos palavras-chave para ser flexível
-            col_qtd_med = next((c for c in df.columns if "DA MEDIÇÃO" in c and "VALOR" not in c), df.columns[5])
-            col_val_med = next((c for c in df.columns if "DA MEDIÇÃO" in c and "VALOR" in c), df.columns[8])
-            col_k0 = next((c for c in df.columns if "FATOR(K)" in c or "K0" in c), df.columns[10])
-            col_reaj = next((c for c in df.columns if "REAJUSTE" in c), df.columns[11])
+            # Colunas da Medição Atual (Aquelas que se repetem no histórico)
+            c_qtd_bm  = identificar_coluna(df.columns, ['DA MEDIÇÃO']) # Quantidade
+            # Filtramos a coluna de valor que contenha 'VALOR' e 'MEDIÇÃO'
+            c_val_bm = next((c for c in df.columns if 'VALOR' in c and 'MEDIÇÃO' in c), None)
+            c_k0     = identificar_coluna(df.columns, ['FATOR', 'K0', '(K)'])
+            c_reaj   = identificar_coluna(df.columns, ['REAJUSTE', 'REAJUSTAMENTO'])
 
-            # Criando DataFrame padronizado para esta BM
-            df_temp = df[[col_cod, col_serv, col_unid, col_precu, col_qtd_orc, col_qtd_med, col_val_med, col_k0, col_reaj]].copy()
-            df_temp.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC', 
-                               f'QTD_{nome_bm}', f'VALOR_{nome_bm}', f'K0_{nome_bm}', f'REAJ_{nome_bm}']
+            nome_bm = file.name.split('.')[0]
+            ordem_bms.append(nome_bm)
+
+            # Criando DataFrame padronizado com as colunas encontradas
+            # Se uma coluna opcional (como K0) não for achada, cria com zeros
+            cols_map = {
+                'COD': c_cod, 'SERVICO': c_serv, 'UNID': c_unid, 
+                'PRECO_UNIT': c_precu, 'QTD_ORC': c_qtd_orc,
+                'QTD_BM': c_qtd_bm, 'VALOR_BM': c_val_bm, 
+                'K0_BM': c_k0, 'REAJ_BM': c_reaj
+            }
+
+            df_temp = pd.DataFrame()
+            for key, col_name in cols_map.items():
+                if col_name and col_name in df.columns:
+                    df_temp[key] = df[col_name]
+                else:
+                    df_temp[key] = 0 # Preenche com 0 se a coluna não existir no arquivo
+
+            # Renomeia as colunas específicas desta medição para o merge
+            df_temp = df_temp.rename(columns={
+                'QTD_BM': f'QTD_{nome_bm}',
+                'VALOR_BM': f'VALOR_{nome_bm}',
+                'K0_BM': f'K0_{nome_bm}',
+                'REAJ_BM': f'REAJ_{nome_bm}'
+            })
+            
+            # Filtro de segurança: remove linhas onde código e serviço são nulos
+            df_temp = df_temp.dropna(subset=['COD', 'SERVICO'], how='all')
             
             dados_bms[nome_bm] = df_temp
             
@@ -55,55 +81,52 @@ if uploaded_files:
             st.error(f"Erro ao processar {file.name}: {e}")
 
     if dados_bms:
-        # 1. CONSTRUÇÃO DA BASE (ORÇAMENTO)
-        # Usamos o primeiro arquivo como referência de estrutura (inclusive títulos)
-        primeira_bm = ordem_arquivos[0]
-        base_df = dados_bms[primeira_bm][['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']].copy()
+        # 1. BASE: Pega a estrutura do primeiro arquivo (inclui Unidades Construtivas)
+        primeira = ordem_bms[0]
+        base_df = dados_bms[primeira][['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']].copy()
 
-        # 2. ADIÇÃO DE ITENS DE ADITIVOS (Sincronização)
-        for nome in ordem_arquivos[1:]:
-            df_atual = dados_bms[nome]
-            # Verifica se existem códigos novos que não estão na base
-            novos_itens = df_atual[~df_atual['COD'].isin(base_df['COD'])][['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']]
-            if not novos_itens.empty:
-                base_df = pd.concat([base_df, novos_itens], ignore_index=True)
+        # 2. ADITIVOS: Adiciona novos serviços que possam surgir em BMs posteriores
+        for nome in ordem_bms[1:]:
+            df_bm = dados_bms[nome]
+            novos = df_bm[~df_bm['COD'].isin(base_df['COD'])][['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']]
+            base_df = pd.concat([base_df, novos], ignore_index=True)
 
-        # 3. MERGE DOS VALORES DE CADA BM
-        resultado_final = base_df
-        for nome in ordem_arquivos:
-            cols_interesse = ['COD', 'SERVICO', f'QTD_{nome}', f'VALOR_{nome}', f'K0_{nome}', f'REAJ_{nome}']
-            resultado_final = pd.merge(resultado_final, dados_bms[nome][cols_interesse], on=['COD', 'SERVICO'], how='left')
+        # 3. MERGE: Encaixa as colunas de cada medição na base
+        resultado = base_df
+        for nome in ordem_bms:
+            cols_med = ['COD', 'SERVICO', f'QTD_{nome}', f'VALOR_{nome}', f'K0_{nome}', f'REAJ_{nome}']
+            resultado = pd.merge(resultado, dados_bms[nome][cols_med], on=['COD', 'SERVICO'], how='left')
 
-        # 4. CÁLCULO DOS ACUMULADOS
-        resultado_final = resultado_final.fillna(0)
+        # 4. TOTAIS ACUMULADOS
+        resultado = resultado.fillna(0)
         
-        c_qtds = [c for c in resultado_final.columns if 'QTD_' in c and 'ORC' not in c]
-        c_vals = [c for c in resultado_final.columns if 'VALOR_' in c]
-        c_reajs = [c for c in resultado_final.columns if 'REAJ_' in c]
+        c_qtds = [c for c in resultado.columns if 'QTD_' in c and 'ORC' not in c]
+        c_vals = [c for c in resultado.columns if 'VALOR_' in c]
+        c_reajs = [c for c in resultado.columns if 'REAJ_' in c]
 
-        resultado_final['QTD_ACUMULADA'] = resultado_final[c_qtds].sum(axis=1)
-        resultado_final['VALOR_ACUMULADO'] = resultado_final[c_vals].sum(axis=1)
-        resultado_final['VALOR_REAJUSTE_ACUMULADO'] = resultado_final[c_reajs].sum(axis=1)
+        resultado['QTD_TOTAL_ACUM'] = resultado[c_qtds].sum(axis=1)
+        resultado['VALOR_TOTAL_ACUM'] = resultado[c_vals].sum(axis=1)
+        resultado['REAJUSTE_TOTAL_ACUM'] = resultado[c_reajs].sum(axis=1)
 
-        # --- EXIBIÇÃO ---
-        st.subheader("📋 Histórico Consolidado (Estrutura Completa)")
-        st.write("Linhas sem Unidade e Preço são tratadas como Unidades Construtivas (Grupos).")
-        
-        # Mostra a tabela (usando estilo para facilitar leitura de grupos)
-        def highlight_groups(s):
-            return ['background-color: #f0f2f6; font-weight: bold' if s.UNID == 0 else '' for _ in s]
+        # 5. IDENTIFICAÇÃO VISUAL DE UNIDADES CONSTRUTIVAS
+        # Conforme seu requisito: Unidades Construtivas têm Preço e Unidade zerados
+        def destacar_estilo(row):
+            if row['PRECO_UNIT'] == 0 and str(row['UNID']) in ['0', '0.0', 'nan', '']:
+                return ['background-color: #e8f4f8; font-weight: bold'] * len(row)
+            return [''] * len(row)
 
-        st.dataframe(resultado_final, use_container_width=True)
+        st.subheader("📋 Histórico Consolidado de Medições")
+        st.dataframe(resultado.style.apply(destacar_estilo, axis=1), use_container_width=True)
 
         # Exportação
         output = io.BytesIO()
-        resultado_final.to_excel(output, index=False)
-        st.download_button("📥 Baixar Planilha de Histórico", output.getvalue(), "historico_consolidado.xlsx")
+        resultado.to_excel(output, index=False)
+        st.download_button("📥 Baixar Planilha Consolidada", output.getvalue(), "historico_obras_GO.xlsx")
 
-        # --- CURVA ABC (Apenas Serviços) ---
-        if st.checkbox("Ver Curva ABC do Acumulado (Exclui Grupos)"):
-            abc = resultado_final[resultado_final['PRECO_UNIT'] > 0].copy()
-            abc = abc.sort_values('VALOR_ACUMULADO', ascending=False)
-            total = abc['VALOR_ACUMULADO'].sum()
-            abc['%_ACUM'] = (abc['VALOR_ACUMULADO'] / total).cumsum() * 100
-            st.dataframe(abc[['COD', 'SERVICO', 'VALOR_ACUMULADO', '%_ACUM']], use_container_width=True)
+        # CURVA ABC (Apenas o que é serviço real)
+        if st.checkbox("Gerar Curva ABC (Excluir Unidades Construtivas)"):
+            abc = resultado[resultado['PRECO_UNIT'] > 0].copy()
+            abc = abc.sort_values('VALOR_TOTAL_ACUM', ascending=False)
+            total = abc['VALOR_TOTAL_ACUM'].sum()
+            abc['%_ACUM'] = (abc['VALOR_TOTAL_ACUM'] / total).cumsum() * 100
+            st.dataframe(abc[['COD', 'SERVICO', 'VALOR_TOTAL_ACUM', '%_ACUM']], use_container_width=True)
