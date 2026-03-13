@@ -25,6 +25,12 @@ def extrair_id_medicao(file):
     except:
         return 999, "BM_Erro"
 
+# Função para formatar números no padrão brasileiro (###.###,00)
+def formatar_br(valor):
+    if pd.isna(valor) or valor == 0:
+        return "0,00"
+    return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
 if uploaded_files:
     processados = []
     for file in uploaded_files:
@@ -33,14 +39,12 @@ if uploaded_files:
     
     processados = sorted(processados, key=lambda x: x['ordem'])
 
-    # 1. Esqueleto Base (Com Corte no Total Mão-de-Obra)
+    # 1. Esqueleto Base
     try:
         ultimo_item = processados[-1]
         eng_m = 'xlrd' if ultimo_item['file'].name.endswith('.xls') else 'openpyxl'
         df_m = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
         
-        # Identificar o limite do orçamento (Corte na linha TOTAL MÃO-DE-OBRA)
-        # Procuramos na primeira coluna (índice 0)
         linha_corte = df_m[df_m.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
         if not linha_corte.empty:
             df_m = df_m.iloc[:linha_corte[0]]
@@ -97,9 +101,9 @@ if uploaded_files:
     # --- TELA: HISTÓRICO ---
     st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
     
-    # Formatação de Estilo e Números
     colunas_numericas = resultado.select_dtypes(include=['float64', 'int64']).columns
-    format_dict = {col: "{:,.2f}" for col in colunas_numericas}
+    # Dicionário de formatação BR
+    format_dict_br = {col: formatar_br for col in colunas_numericas}
 
     def format_rows(row):
         if row['PRECO_UNIT'] == 0:
@@ -107,22 +111,20 @@ if uploaded_files:
         return [''] * len(row)
 
     st.dataframe(
-        resultado.style.apply(format_rows, axis=1).format(format_dict), 
+        resultado.style.apply(format_rows, axis=1).format(format_dict_br), 
         use_container_width=True
     )
 
     # --- ABA: CURVA ABC ---
     st.divider()
-    st.subheader("📈 Análise de Curva ABC (Filtro por Serviços)")
+    st.subheader("📈 Análise de Curva ABC")
     
-    # Filtro: Apenas Serviços (Preço > 0) e com valor medido
     abc = resultado[resultado['PRECO_UNIT'] > 0].copy()
-    abc = abc[abc['TOTAL_GERAL'] > 0.01] # Evita lixo residual de centavos
+    abc = abc[abc['TOTAL_GERAL'] > 0.01]
     
     if not abc.empty:
         abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
         total_global_abc = abc['TOTAL_GERAL'].sum()
-        
         abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_global_abc) * 100
         abc['%_ACUMULADO'] = abc['%_SIMPLES'].cumsum()
         
@@ -135,11 +137,10 @@ if uploaded_files:
 
         # Resumo Financeiro
         m1, m2, m3 = st.columns(3)
-        m1.metric("Total de Serviços (ABC)", f"R$ {total_global_abc:,.2f}")
-        m2.metric("Total Reajuste (Geral)", f"R$ {resultado['REAJUSTE_ACUMULADO'].sum():,.2f}")
+        m1.metric("Total de Serviços (ABC)", f"R$ {formatar_br(total_global_abc)}")
+        m2.metric("Total Reajuste (Geral)", f"R$ {formatar_br(resultado['REAJUSTE_ACUMULADO'].sum())}")
         m3.metric("Itens Classe A", f"{len(abc[abc['CLASSE'] == 'A'])}")
 
-        # Estilo para Classe
         def color_classe(val):
             color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
             return f'color: {color}; font-weight: bold'
@@ -147,16 +148,14 @@ if uploaded_files:
         st.dataframe(
             abc[['COD', 'SERVICO', 'UNID', 'VALOR_ACUMULADO', 'REAJUSTE_ACUMULADO', 'TOTAL_GERAL', '%_ACUMULADO', 'CLASSE']]
             .style.format({
-                'VALOR_ACUMULADO': '{:,.2f}',
-                'REAJUSTE_ACUMULADO': '{:,.2f}',
-                'TOTAL_GERAL': '{:,.2f}',
-                '%_ACUMULADO': '{:.2f}%'
+                'VALOR_ACUMULADO': formatar_br,
+                'REAJUSTE_ACUMULADO': formatar_br,
+                'TOTAL_GERAL': formatar_br,
+                '%_ACUMULADO': "{:.2f}%"
             })
             .applymap(color_classe, subset=['CLASSE']),
             use_container_width=True
         )
-    else:
-        st.warning("Não foram encontrados serviços medidos para compor a Curva ABC.")
 
     # Exportação Final
     output = io.BytesIO()
