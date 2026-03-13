@@ -3,7 +3,7 @@ import pandas as pd
 import io
 
 st.set_page_config(page_title="Histórico Consolidado GOINFRA", layout="wide")
-st.title("📑 Consolidador de Histórico (Estrutura Orçamentária)")
+st.title("📑 Consolidador de Histórico (Correção de Valores)")
 
 uploaded_files = st.sidebar.file_uploader(
     "Carregue as medições na ordem cronológica (BM1, BM2...)", 
@@ -11,99 +11,112 @@ uploaded_files = st.sidebar.file_uploader(
     accept_multiple_files=True
 )
 
-def identificar_coluna(lista_cols, termos):
-    for col in lista_cols:
-        if any(termo in str(col).upper() for termo in termos):
-            return col
-    return None
+def identificar_colunas_medicao(df):
+    """
+    Busca especificamente as colunas de Quantidade e Valor da Medição
+    considerando que ambas podem ter nomes parecidos.
+    """
+    cols = df.columns.tolist()
+    c_qtd, c_val = None, None
+    
+    # Procura as colunas que contêm 'DA MEDIÇÃO'
+    possiveis = [c for c in cols if 'DA MEDIÇÃO' in str(c).upper()]
+    
+    for p in possiveis:
+        # Geralmente a planilha GOINFRA coloca a Qtd antes do Valor
+        # ou diferencia por palavras chave no cabeçalho original
+        # Se houver duas colunas 'DA MEDIÇÃO', a primeira é Qtd e a segunda é Valor
+        # Mas vamos testar o tipo de dado predominante na coluna
+        amostra = df[p].dropna().head(10)
+        # Se for a coluna de valor, geralmente tem valores maiores ou decimais de moeda
+        if c_qtd is None:
+            c_qtd = p
+        else:
+            c_val = p
+            
+    return c_qtd, c_val
 
 if uploaded_files:
-    # 1. CRIAR O ESQUELETO (Baseado obrigatoriamente no primeiro arquivo)
     try:
-        primeiro_arquivo = uploaded_files[0]
-        df_base = pd.read_excel(primeiro_arquivo, skiprows=25)
+        # 1. ESQUELETO (Orçamento Base)
+        primeiro = uploaded_files[0]
+        df_base = pd.read_excel(primeiro, skiprows=25)
         df_base.columns = [str(c).strip().upper() for c in df_base.columns]
         df_base = df_base.loc[:, ~df_base.columns.str.contains('UNNAMED|NAN', case=False)]
         
-        # Identifica as colunas base do orçamento
+        # Colunas Fixas
         c_cod = df_base.columns[0]
         c_serv = df_base.columns[1]
-        c_unid = identificar_coluna(df_base.columns, ['UNID'])
-        c_precu = identificar_coluna(df_base.columns, ['PREÇO UNIT', 'UNITÁRIO'])
-        c_qtd_orc = identificar_coluna(df_base.columns, ['CONTRATADA', 'QTD. ORC'])
+        c_unid = next((c for c in df_base.columns if 'UNID' in c), df_base.columns[2])
+        c_precu = next((c for c in df_base.columns if 'UNIT' in c), df_base.columns[3])
+        c_qtd_orc = next((c for c in df_base.columns if 'CONTRATADA' in c or 'QTD. ORC' in c), df_base.columns[4])
         
-        # Filtra apenas o essencial e cria um ID de posição para não duplicar grupos
-        esqueleto = df_base[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
-        esqueleto.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
-        esqueleto['POSICAO_ORIGINAL'] = esqueleto.index # Chave mestra para manter a estrutura
-        
-        # Limpa linhas totalmente vazias que o Excel às vezes traz no fim
-        esqueleto = esqueleto.dropna(subset=['COD', 'SERVICO'], how='all')
+        resultado = df_base[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
+        resultado.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
         
     except Exception as e:
-        st.error(f"Erro ao ler o arquivo base (Orçamento): {e}")
+        st.error(f"Erro ao montar esqueleto: {e}")
         st.stop()
 
-    # 2. PROCESSAR AS MEDIÇÕES E ENCAIXAR NO ESQUELETO
-    resultado = esqueleto.copy()
-    ordem_bms = []
-
+    # 2. PROCESSAMENTO DAS BMs
     for file in uploaded_files:
         try:
             df_bm = pd.read_excel(file, skiprows=25)
             df_bm.columns = [str(c).strip().upper() for c in df_bm.columns]
-            df_bm = df_bm.loc[:, ~df_bm.columns.str.contains('UNNAMED|NAN', case=False)]
             
             nome_bm = file.name.split('.')[0]
-            ordem_bms.append(nome_bm)
-
-            # Mapeia colunas de medição do arquivo atual
-            c_qtd_bm = identificar_coluna(df_bm.columns, ['DA MEDIÇÃO'])
-            c_val_bm = next((c for c in df_bm.columns if 'VALOR' in c and 'MEDIÇÃO' in c), None)
-            c_k0 = identificar_coluna(df_bm.columns, ['FATOR', 'K0', '(K)'])
-            c_reaj = identificar_coluna(df_bm.columns, ['REAJUSTE', 'REAJUSTAMENTO'])
-
-            # Criamos um dataframe temporário da medição mantendo o índice original
-            # Isso assume que os arquivos de medição seguem a mesma ordem de linhas do orçamento
-            medicao_temp = pd.DataFrame(index=df_bm.index)
-            medicao_temp[f'QTD_{nome_bm}'] = pd.to_numeric(df_bm[c_qtd_bm], errors='coerce').fillna(0) if c_qtd_bm else 0
-            medicao_temp[f'VALOR_{nome_bm}'] = pd.to_numeric(df_bm[c_val_bm], errors='coerce').fillna(0) if c_val_bm else 0
-            medicao_temp[f'K0_{nome_bm}'] = df_bm[c_k0] if c_k0 else 1.0
-            medicao_temp[f'REAJ_{nome_bm}'] = pd.to_numeric(df_bm[c_reaj], errors='coerce').fillna(0) if c_reaj else 0
             
-            # Unimos ao resultado pela posição da linha (index)
-            resultado = resultado.join(medicao_temp)
+            # Localização manual precisa das colunas 'DA MEDIÇÃO'
+            # Na GOINFRA: Coluna 6 aprox é Qtd, Coluna 9 aprox é Valor (índices 5 e 8)
+            # Vamos usar uma lógica de exclusão:
+            cols_da_medicao = [i for i, c in enumerate(df_bm.columns) if 'DA MEDIÇÃO' in c]
+            
+            if len(cols_da_medicao) >= 2:
+                idx_qtd = cols_da_medicao[0]
+                idx_val = cols_da_medicao[1]
+            else:
+                # Caso as colunas tenham nomes diferentes
+                idx_qtd = 5 # Posição padrão Qtd
+                idx_val = 8 # Posição padrão Valor
+            
+            c_k0 = next((i for i, c in enumerate(df_bm.columns) if 'FATOR' in c or 'K0' in c), 10)
+            c_reaj = next((i for i, c in enumerate(df_bm.columns) if 'REAJUSTE' in c), 11)
+
+            # Extração forçada pelos índices das colunas detectadas
+            med_temp = pd.DataFrame(index=df_bm.index)
+            med_temp[f'QTD_{nome_bm}'] = pd.to_numeric(df_bm.iloc[:, idx_qtd], errors='coerce').fillna(0)
+            med_temp[f'VALOR_{nome_bm}'] = pd.to_numeric(df_bm.iloc[:, idx_val], errors='coerce').fillna(0)
+            med_temp[f'K0_{nome_bm}'] = df_bm.iloc[:, c_k0].fillna(1.0)
+            med_temp[f'REAJ_{nome_bm}'] = pd.to_numeric(df_bm.iloc[:, c_reaj], errors='coerce').fillna(0)
+            
+            resultado = resultado.join(med_temp)
             
         except Exception as e:
-            st.warning(f"Erro ao processar medição {file.name}: {e}")
+            st.warning(f"Atenção no arquivo {file.name}: {e}")
 
-    # 3. CÁLCULOS ACUMULADOS
+    # 3. CONSOLIDAÇÃO FINAL
     resultado = resultado.fillna(0)
     
+    # Somatórios
     c_qtds = [c for c in resultado.columns if 'QTD_' in c]
     c_vals = [c for c in resultado.columns if 'VALOR_' in c]
     c_reajs = [c for c in resultado.columns if 'REAJ_' in c]
 
-    resultado['QTD_TOTAL_ACUM'] = resultado[c_qtds].sum(axis=1)
-    resultado['VALOR_TOTAL_ACUM'] = resultado[c_vals].sum(axis=1)
-    resultado['REAJUSTE_TOTAL_ACUM'] = resultado[c_reajs].sum(axis=1)
-    resultado['VALOR_GLOBAL_ACUM'] = resultado['VALOR_TOTAL_ACUM'] + resultado['REAJUSTE_TOTAL_ACUM']
+    resultado['QTD_ACUMULADA'] = resultado[c_qtds].sum(axis=1)
+    resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
+    resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
+    resultado['VALOR_GLOBAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
 
-    # 4. FORMATAÇÃO E EXIBIÇÃO
-    def estilo_hierarquia(row):
-        # Unidades Construtivas (Grupos) geralmente não têm unidade física ou preço unitário
-        if row['PRECO_UNIT'] == 0 or str(row['UNID']).strip() in ['0', 'nan', '']:
-            return ['background-color: #f8f9fa; font-weight: bold; color: #1f77b4'] * len(row)
+    # Estilização para Unidades Construtivas
+    def style_rows(row):
+        if row['PRECO_UNIT'] == 0:
+            return ['background-color: #f0f2f6; font-weight: bold'] * len(row)
         return [''] * len(row)
 
-    st.subheader("📋 Relatório Consolidado")
-    st.info("A estrutura abaixo segue rigorosamente a ordem das linhas do primeiro arquivo enviado.")
+    st.subheader("✅ Histórico Consolidado (Valores Corrigidos)")
+    st.dataframe(resultado.style.apply(style_rows, axis=1), use_container_width=True)
     
-    # Exibição otimizada (removendo coluna de posição técnica)
-    df_display = resultado.drop(columns=['POSICAO_ORIGINAL'])
-    st.dataframe(df_display.style.apply(estilo_hierarquia, axis=1), use_container_width=True)
-
-    # Exportação
+    # Download
     output = io.BytesIO()
     resultado.to_excel(output, index=False)
-    st.download_button("📥 Baixar Planilha Consolidada", output.getvalue(), "historico_fidedigno_goinfra.xlsx")
+    st.download_button("📥 Baixar Planilha Consolidada", output.getvalue(), "historico_finedigno_v2.xlsx")
