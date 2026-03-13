@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import re
 
-st.set_page_config(page_title="Consolidador Cronológico GOINFRA", layout="wide")
+st.set_page_config(page_title="Consolidador GOINFRA Profissional", layout="wide")
 st.title("📑 Consolidador de Histórico e Curva ABC")
 
 uploaded_files = st.sidebar.file_uploader(
@@ -21,7 +21,7 @@ def extrair_id_medicao(file):
         if numeros:
             num = int(numeros[0])
             return num, f"BM_{num:02d}"
-        return 999, f"BM_{file.name[:10]}"
+        return 999, "BM_Erro"
     except:
         return 999, "BM_Erro"
 
@@ -33,11 +33,18 @@ if uploaded_files:
     
     processados = sorted(processados, key=lambda x: x['ordem'])
 
-    # 1. Esqueleto Base
+    # 1. Esqueleto Base (Com Corte no Total Mão-de-Obra)
     try:
         ultimo_item = processados[-1]
         eng_m = 'xlrd' if ultimo_item['file'].name.endswith('.xls') else 'openpyxl'
         df_m = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
+        
+        # Identificar o limite do orçamento (Corte na linha TOTAL MÃO-DE-OBRA)
+        # Procuramos na primeira coluna (índice 0)
+        linha_corte = df_m[df_m.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
+        if not linha_corte.empty:
+            df_m = df_m.iloc[:linha_corte[0]]
+
         df_m.columns = [str(c).strip().upper() for c in df_m.columns]
         df_m = df_m.loc[:, ~df_m.columns.str.contains('UNNAMED|NAN', case=False)]
         
@@ -89,61 +96,74 @@ if uploaded_files:
 
     # --- TELA: HISTÓRICO ---
     st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
+    
+    # Formatação de Estilo e Números
+    colunas_numericas = resultado.select_dtypes(include=['float64', 'int64']).columns
+    format_dict = {col: "{:,.2f}" for col in colunas_numericas}
+
     def format_rows(row):
         if row['PRECO_UNIT'] == 0:
             return ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(row)
         return [''] * len(row)
-    st.dataframe(resultado.style.apply(format_rows, axis=1), use_container_width=True)
+
+    st.dataframe(
+        resultado.style.apply(format_rows, axis=1).format(format_dict), 
+        use_container_width=True
+    )
 
     # --- ABA: CURVA ABC ---
     st.divider()
-    st.subheader("📈 Análise de Curva ABC (Somente Serviços)")
+    st.subheader("📈 Análise de Curva ABC (Filtro por Serviços)")
     
-    # Filtro: Remove Unidades Construtivas (Preço Unitário == 0) e itens não medidos
+    # Filtro: Apenas Serviços (Preço > 0) e com valor medido
     abc = resultado[resultado['PRECO_UNIT'] > 0].copy()
-    abc = abc[abc['TOTAL_GERAL'] > 0]
+    abc = abc[abc['TOTAL_GERAL'] > 0.01] # Evita lixo residual de centavos
     
     if not abc.empty:
         abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
-        total_acumulado = abc['TOTAL_GERAL'].sum()
+        total_global_abc = abc['TOTAL_GERAL'].sum()
         
-        # Cálculos de Pareto
-        abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_acumulado) * 100
+        abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_global_abc) * 100
         abc['%_ACUMULADO'] = abc['%_SIMPLES'].cumsum()
         
         def classificar_abc(porc):
-            if porc <= 80: return 'A'
-            if porc <= 95: return 'B'
+            if porc <= 80.01: return 'A'
+            if porc <= 95.01: return 'B'
             return 'C'
         
         abc['CLASSE'] = abc['%_ACUMULADO'].apply(classificar_abc)
 
-        # Exibição da Curva ABC
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Itens Classe A", len(abc[abc['CLASSE'] == 'A']))
-        c2.metric("Valor Total Acumulado", f"R$ {total_acumulado:,.2f}")
-        c3.metric("Total Reajustes", f"R$ {resultado['REAJUSTE_ACUMULADO'].sum():,.2f}")
+        # Resumo Financeiro
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total de Serviços (ABC)", f"R$ {total_global_abc:,.2f}")
+        m2.metric("Total Reajuste (Geral)", f"R$ {resultado['REAJUSTE_ACUMULADO'].sum():,.2f}")
+        m3.metric("Itens Classe A", f"{len(abc[abc['CLASSE'] == 'A'])}")
 
-        # Estilização da tabela ABC por classe
+        # Estilo para Classe
         def color_classe(val):
-            color = '#ff4b4b' if val == 'A' else ('#ffa500' if val == 'B' else '#28a745')
+            color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
             return f'color: {color}; font-weight: bold'
 
         st.dataframe(
-            abc[['COD', 'SERVICO', 'UNID', 'TOTAL_GERAL', '%_SIMPLES', '%_ACUMULADO', 'CLASSE']]
-            .style.format({'TOTAL_GERAL': '{:,.2f}', '%_SIMPLES': '{:.2f}%', '%_ACUMULADO': '{:.2f}%'})
+            abc[['COD', 'SERVICO', 'UNID', 'VALOR_ACUMULADO', 'REAJUSTE_ACUMULADO', 'TOTAL_GERAL', '%_ACUMULADO', 'CLASSE']]
+            .style.format({
+                'VALOR_ACUMULADO': '{:,.2f}',
+                'REAJUSTE_ACUMULADO': '{:,.2f}',
+                'TOTAL_GERAL': '{:,.2f}',
+                '%_ACUMULADO': '{:.2f}%'
+            })
             .applymap(color_classe, subset=['CLASSE']),
             use_container_width=True
         )
     else:
-        st.warning("Não há dados financeiros medidos para gerar a Curva ABC.")
+        st.warning("Não foram encontrados serviços medidos para compor a Curva ABC.")
 
     # Exportação Final
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        resultado.to_excel(writer, sheet_name='Historico_Completo', index=False)
+        resultado.to_excel(writer, sheet_name='Historico_Limpo', index=False)
         if not abc.empty:
             abc.to_excel(writer, sheet_name='Curva_ABC', index=False)
     
     st.sidebar.divider()
-    st.sidebar.download_button("📥 Baixar Relatório (Excel)", output.getvalue(), "relatorio_consolidado_abc.xlsx")
+    st.sidebar.download_button("📥 Baixar Relatório Final (Excel)", output.getvalue(), "relatorio_goinfra_limpo.xlsx")
