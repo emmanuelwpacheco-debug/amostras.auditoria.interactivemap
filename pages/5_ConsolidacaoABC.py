@@ -100,9 +100,7 @@ if uploaded_files:
 
     # --- TELA: HISTÓRICO ---
     st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
-    
     colunas_numericas = resultado.select_dtypes(include=['float64', 'int64']).columns
-    # Dicionário de formatação BR
     format_dict_br = {col: formatar_br for col in colunas_numericas}
 
     def format_rows(row):
@@ -110,21 +108,24 @@ if uploaded_files:
             return ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(row)
         return [''] * len(row)
 
-    st.dataframe(
-        resultado.style.apply(format_rows, axis=1).format(format_dict_br), 
-        use_container_width=True
-    )
+    st.dataframe(resultado.style.apply(format_rows, axis=1).format(format_dict_br), use_container_width=True)
 
     # --- ABA: CURVA ABC ---
     st.divider()
-    st.subheader("📈 Análise de Curva ABC")
+    st.subheader("📈 Análise de Curva ABC (Somente Serviços)")
     
+    # IMPORTANTE: Filtramos apenas serviços reais para a ABC
     abc = resultado[resultado['PRECO_UNIT'] > 0].copy()
     abc = abc[abc['TOTAL_GERAL'] > 0.01]
     
     if not abc.empty:
         abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
+        
+        # Somas baseadas apenas nos serviços (evita duplicidade dos títulos)
+        total_pi_abc = abc['VALOR_ACUMULADO'].sum()
+        total_reajuste_abc = abc['REAJUSTE_ACUMULADO'].sum()
         total_global_abc = abc['TOTAL_GERAL'].sum()
+        
         abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_global_abc) * 100
         abc['%_ACUMULADO'] = abc['%_SIMPLES'].cumsum()
         
@@ -135,11 +136,12 @@ if uploaded_files:
         
         abc['CLASSE'] = abc['%_ACUMULADO'].apply(classificar_abc)
 
-        # Resumo Financeiro
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total de Serviços (ABC)", f"R$ {formatar_br(total_global_abc)}")
-        m2.metric("Total Reajuste (Geral)", f"R$ {formatar_br(resultado['REAJUSTE_ACUMULADO'].sum())}")
-        m3.metric("Itens Classe A", f"{len(abc[abc['CLASSE'] == 'A'])}")
+        # Resumo Financeiro Corrigido
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Serviços (PI)", f"R$ {formatar_br(total_pi_abc)}")
+        m2.metric("Total Reajuste", f"R$ {formatar_br(total_reajuste_abc)}")
+        m3.metric("Total Global (PI + Reaj)", f"R$ {formatar_br(total_global_abc)}")
+        m4.metric("Itens Classe A", f"{len(abc[abc['CLASSE'] == 'A'])}")
 
         def color_classe(val):
             color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
