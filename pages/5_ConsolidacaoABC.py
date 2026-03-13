@@ -7,92 +7,67 @@ st.set_page_config(page_title="Consolidador GOINFRA Profissional", layout="wide"
 st.title("📑 Consolidador de Histórico e Curva ABC")
 
 uploaded_files = st.sidebar.file_uploader(
-    "Carregue as medições (.xls ou .xlsx)",
-    type=["xls", "xlsx"],
+    "Carregue as medições (.xls ou .xlsx)", 
+    type=['xls', 'xlsx'], 
     accept_multiple_files=True
 )
-
-# ==============================
-# Funções auxiliares
-# ==============================
 
 def extrair_id_medicao(file):
     try:
         file.seek(0)
-        engine = "xlrd" if file.name.endswith(".xls") else "openpyxl"
-
-        df_cabecalho = pd.read_excel(
-            file,
-            nrows=12,
-            usecols="J",
-            header=None,
-            engine=engine
-        )
-
+        engine = 'xlrd' if file.name.endswith('.xls') else 'openpyxl'
+        df_cabecalho = pd.read_excel(file, nrows=12, usecols="J", header=None, engine=engine)
         texto_j12 = str(df_cabecalho.iloc[11, 0]).strip()
-
-        numeros = re.findall(r"(\d+)", texto_j12)
-
+        numeros = re.findall(r'(\d+)', texto_j12)
         if numeros:
             num = int(numeros[0])
             return num, f"BM_{num:02d}"
-
         return 999, "BM_Erro"
-
     except:
         return 999, "BM_Erro"
 
 
 def formatar_br(valor):
-
     if pd.isna(valor) or valor == 0:
         return "0,00"
-
     return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-
-def carregar_planilha(file):
-
-    file.seek(0)
-
-    engine = "xlrd" if file.name.endswith(".xls") else "openpyxl"
-
-    return pd.read_excel(file, skiprows=25, engine=engine)
-
-
-# ==============================
-# Processamento principal
-# ==============================
 
 if uploaded_files:
 
     processados = []
 
     for file in uploaded_files:
-
         ordem, label = extrair_id_medicao(file)
 
         processados.append({
-            "file": file,
-            "ordem": ordem,
-            "label": label
+            'file': file,
+            'ordem': ordem,
+            'label': label
         })
 
-    processados = sorted(processados, key=lambda x: x["ordem"])
+    processados = sorted(processados, key=lambda x: x['ordem'])
 
-    # ==============================
-    # 1. Estrutura base (última medição)
-    # ==============================
+    # ==========================
+    # 1. Estrutura base
+    # ==========================
 
     try:
 
         ultimo_item = processados[-1]
 
-        df_m = carregar_planilha(ultimo_item["file"])
+        ultimo_item['file'].seek(0)
+
+        eng_m = 'xlrd' if ultimo_item['file'].name.endswith('.xls') else 'openpyxl'
+
+        df_m = pd.read_excel(
+            ultimo_item['file'],
+            skiprows=25,
+            engine=eng_m
+        )
 
         linha_corte = df_m[
-            df_m.iloc[:, 0]
-            .astype(str)
+            df_m.iloc[:,0].astype(str)
             .str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)
         ].index
 
@@ -101,147 +76,134 @@ if uploaded_files:
 
         df_m.columns = [str(c).strip().upper() for c in df_m.columns]
 
-        df_m = df_m.loc[:, ~df_m.columns.str.contains("UNNAMED|NAN", case=False)]
+        df_m = df_m.loc[:, ~df_m.columns.str.contains('UNNAMED|NAN', case=False)]
 
         c_cod = df_m.columns[0]
         c_serv = df_m.columns[1]
 
-        c_unid = next((c for c in df_m.columns if "UNID" in c), df_m.columns[2])
+        c_unid = next((c for c in df_m.columns if 'UNID' in c), df_m.columns[2])
 
-        c_precu = next((c for c in df_m.columns if "UNIT" in c), df_m.columns[3])
+        c_precu = next((c for c in df_m.columns if 'UNIT' in c), df_m.columns[3])
 
-        c_qtd_orc = next(
-            (
-                c for c in df_m.columns
-                if "CONTRATADA" in c or "QTD. ORC" in c
-            ),
-            df_m.columns[4]
-        )
+        c_qtd_orc = next((c for c in df_m.columns if 'CONTRATADA' in c or 'QTD. ORC' in c), df_m.columns[4])
 
-        resultado = df_m[
-            [c_cod, c_serv, c_unid, c_precu, c_qtd_orc]
-        ].copy()
+        resultado = df_m[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
 
         resultado.columns = [
-            "COD",
-            "SERVICO",
-            "UNID",
-            "PRECO_UNIT",
-            "QTD_ORC"
+            'COD',
+            'SERVICO',
+            'UNID',
+            'PRECO_UNIT',
+            'QTD_ORC'
         ]
 
-        resultado["ID_LINHA"] = resultado.index
+        resultado['COD'] = resultado['COD'].astype(str).str.strip()
 
     except Exception as e:
 
         st.error(f"Erro na estrutura mestre: {e}")
-
         st.stop()
 
-    # ==============================
+    # ==========================
     # 2. Integração das medições
-    # ==============================
+    # ==========================
 
     for item in processados:
 
         try:
 
-            df_bm = carregar_planilha(item["file"])
+            item['file'].seek(0)
+
+            eng = 'xlrd' if item['file'].name.endswith('.xls') else 'openpyxl'
+
+            df_bm = pd.read_excel(
+                item['file'],
+                skiprows=25,
+                engine=eng
+            )
 
             df_bm.columns = [str(c).strip().upper() for c in df_bm.columns]
 
-            label = item["label"]
+            df_bm['COD'] = df_bm.iloc[:,0].astype(str).str.strip()
 
-            cols_med = [
-                c for c in df_bm.columns if "DA MEDIÇÃO" in c
-            ]
+            label = item['label']
+
+            cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
 
             c_reaj = next(
-                (
-                    c for c in df_bm.columns
-                    if "REAJUSTE" in c or "REAJUSTAMENTO" in c
-                ),
+                (c for c in df_bm.columns if 'REAJUSTE' in c or 'REAJUSTAMENTO' in c),
                 None
             )
 
-            med_cols = pd.DataFrame(index=df_bm.index)
+            med_cols = pd.DataFrame()
+
+            med_cols['COD'] = df_bm['COD']
 
             if len(cols_med) >= 2:
 
-                med_cols[f"QTD_{label}"] = pd.to_numeric(
+                med_cols[f'QTD_{label}'] = pd.to_numeric(
                     df_bm[cols_med[0]],
-                    errors="coerce"
+                    errors='coerce'
                 ).fillna(0)
 
-                med_cols[f"VALOR_{label}"] = pd.to_numeric(
+                med_cols[f'VALOR_{label}'] = pd.to_numeric(
                     df_bm[cols_med[1]],
-                    errors="coerce"
+                    errors='coerce'
                 ).fillna(0)
 
             if c_reaj:
 
-                med_cols[f"REAJ_{label}"] = pd.to_numeric(
+                med_cols[f'REAJ_{label}'] = pd.to_numeric(
                     df_bm[c_reaj],
-                    errors="coerce"
+                    errors='coerce'
                 ).fillna(0)
-
-            med_cols["ID_LINHA"] = med_cols.index
 
             resultado = pd.merge(
                 resultado,
                 med_cols,
-                on="ID_LINHA",
-                how="left"
+                on='COD',
+                how='left'
             )
 
-        except Exception as e:
+        except:
+            pass
 
-            st.warning(f"Erro ao processar {item['label']}: {e}")
-
-    # ==============================
+    # ==========================
     # 3. Consolidação final
-    # ==============================
+    # ==========================
 
-    resultado = resultado.drop(columns=["ID_LINHA"]).fillna(0)
+    resultado = resultado.fillna(0)
 
-    c_qtds = [c for c in resultado.columns if "QTD_" in c]
-    c_vals = [c for c in resultado.columns if "VALOR_" in c]
-    c_reajs = [c for c in resultado.columns if "REAJ_" in c]
+    c_qtds = [c for c in resultado.columns if 'QTD_' in c]
+    c_vals = [c for c in resultado.columns if 'VALOR_' in c]
+    c_reajs = [c for c in resultado.columns if 'REAJ_' in c]
 
-    resultado["QTD_ACUMULADA"] = resultado[c_qtds].sum(axis=1)
+    resultado['QTD_ACUMULADA'] = resultado[c_qtds].sum(axis=1)
+    resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
+    resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
 
-    resultado["VALOR_ACUMULADO"] = resultado[c_vals].sum(axis=1)
-
-    resultado["REAJUSTE_ACUMULADO"] = resultado[c_reajs].sum(axis=1)
-
-    resultado["TOTAL_GERAL"] = (
-        resultado["VALOR_ACUMULADO"]
-        + resultado["REAJUSTE_ACUMULADO"]
+    resultado['TOTAL_GERAL'] = (
+        resultado['VALOR_ACUMULADO']
+        + resultado['REAJUSTE_ACUMULADO']
     )
 
-    # ==============================
+    # ==========================
     # Tela histórico
-    # ==============================
+    # ==========================
 
-    st.subheader(
-        f"✅ Histórico Consolidado ({len(processados)} medições)"
-    )
+    st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
 
-    colunas_numericas = resultado.select_dtypes(
-        include=["float64", "int64"]
-    ).columns
+    colunas_numericas = resultado.select_dtypes(include=['float64','int64']).columns
 
     format_dict_br = {col: formatar_br for col in colunas_numericas}
 
     def format_rows(row):
 
-        if row["PRECO_UNIT"] == 0:
+        if row['PRECO_UNIT'] == 0:
 
-            return [
-                "background-color: #f0f2f6; font-weight: bold"
-            ] * len(row)
+            return ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(row)
 
-        return [""] * len(row)
+        return [''] * len(row)
 
     st.dataframe(
         resultado
@@ -250,161 +212,96 @@ if uploaded_files:
         .format(format_dict_br),
         use_container_width=True
     )
-# ==============================
-# Indicadores do contrato
-# ==============================
 
-valor_contratado = (resultado['PRECO_UNIT'] * resultado['QTD_ORC']).sum()
+    # ==========================
+    # Curva ABC
+    # ==========================
 
-valor_medido = resultado['VALOR_ACUMULADO'].sum()
+    st.divider()
+    st.subheader("📈 Análise de Curva ABC")
 
-valor_reajuste = resultado['REAJUSTE_ACUMULADO'].sum()
+    abc = resultado[resultado['PRECO_UNIT'] > 0].copy()
 
-valor_total_pago = valor_medido + valor_reajuste
+    abc = abc[abc['TOTAL_GERAL'] > 0.01]
 
-saldo_contrato = valor_contratado - valor_total_pago
+    if not abc.empty:
 
-percentual_executado = 0
-if valor_contratado > 0:
-    percentual_executado = (valor_total_pago / valor_contratado) * 100
+        abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
 
-st.subheader("📊 Situação do Contrato")
+        total_global_abc = abc['TOTAL_GERAL'].sum()
 
-k1, k2, k3, k4 = st.columns(4)
+        abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_global_abc) * 100
 
-k1.metric(
-    "Valor Contratado",
-    f"R$ {formatar_br(valor_contratado)}"
-)
+        abc['%_ACUMULADO'] = abc['%_SIMPLES'].cumsum()
 
-k2.metric(
-    "Valor Medido",
-    f"R$ {formatar_br(valor_medido)}"
-)
+        def classificar_abc(porc):
 
-k3.metric(
-    "Percentual Executado",
-    f"{percentual_executado:.2f}%"
-)
+            if porc <= 80.01:
+                return 'A'
 
-k4.metric(
-    "Saldo Contratual",
-    f"R$ {formatar_br(saldo_contrato)}"
-)
-    # ==============================
-    # --- ABA: CURVA ABC ---
-st.divider()
-st.subheader("📈 Análise de Curva ABC")
+            if porc <= 95.01:
+                return 'B'
 
-abc = resultado[resultado['PRECO_UNIT'] > 0].copy()
-abc = abc[abc['TOTAL_GERAL'] > 0.01]
+            return 'C'
 
-if not abc.empty:
+        abc['CLASSE'] = abc['%_ACUMULADO'].apply(classificar_abc)
 
-    abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
+        m1, m2, m3 = st.columns(3)
 
-    total_global_abc = abc['TOTAL_GERAL'].sum()
+        m1.metric("Total de Serviços (ABC)", f"R$ {formatar_br(total_global_abc)}")
 
-    if total_global_abc == 0:
-        total_global_abc = 1
+        m2.metric("Total Reajuste (Geral)", f"R$ {formatar_br(resultado['REAJUSTE_ACUMULADO'].sum())}")
 
-    abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_global_abc) * 100
-    abc['%_ACUMULADO'] = abc['%_SIMPLES'].cumsum()
+        m3.metric("Itens Classe A", f"{len(abc[abc['CLASSE'] == 'A'])}")
 
-    def classificar_abc(porc):
-        if porc <= 80.01:
-            return 'A'
-        if porc <= 95.01:
-            return 'B'
-        return 'C'
+        def color_classe(val):
 
-    abc['CLASSE'] = abc['%_ACUMULADO'].apply(classificar_abc)
+            color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
 
-    # Resumo Financeiro
-    m1, m2, m3 = st.columns(3)
+            return f'color: {color}; font-weight: bold'
 
-    m1.metric(
-        "Total de Serviços (ABC)",
-        f"R$ {formatar_br(total_global_abc)}"
-    )
-
-    m2.metric(
-        "Total Reajuste (Geral)",
-        f"R$ {formatar_br(resultado['REAJUSTE_ACUMULADO'].sum())}"
-    )
-
-    m3.metric(
-        "Itens Classe A",
-        f"{len(abc[abc['CLASSE'] == 'A'])}"
-    )
-
-    def color_classe(val):
-
-        color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
-
-        return f'color: {color}; font-weight: bold'
-
-    st.dataframe(
-        abc[
-            [
-                'COD',
-                'SERVICO',
-                'UNID',
-                'VALOR_ACUMULADO',
-                'REAJUSTE_ACUMULADO',
-                'TOTAL_GERAL',
-                '%_ACUMULADO',
-                'CLASSE'
+        st.dataframe(
+            abc[
+                [
+                    'COD',
+                    'SERVICO',
+                    'UNID',
+                    'VALOR_ACUMULADO',
+                    'REAJUSTE_ACUMULADO',
+                    'TOTAL_GERAL',
+                    '%_ACUMULADO',
+                    'CLASSE'
+                ]
             ]
-        ]
-        .style
-        .format({
-            'VALOR_ACUMULADO': formatar_br,
-            'REAJUSTE_ACUMULADO': formatar_br,
-            'TOTAL_GERAL': formatar_br,
-            '%_ACUMULADO': "{:.2f}%"
-        })
-        .applymap(color_classe, subset=['CLASSE']),
-        use_container_width=True
-    )
-           # ==============================
+            .style
+            .format({
+                'VALOR_ACUMULADO': formatar_br,
+                'REAJUSTE_ACUMULADO': formatar_br,
+                'TOTAL_GERAL': formatar_br,
+                '%_ACUMULADO': "{:.2f}%"
+            })
+            .applymap(color_classe, subset=['CLASSE']),
+            use_container_width=True
+        )
+
+    # ==========================
     # Exportação
-    # ==============================
+    # ==========================
 
     output = io.BytesIO()
 
-    with pd.ExcelWriter(
-        output,
-        engine="openpyxl"
-    ) as writer:
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
 
-        resultado.to_excel(
-            writer,
-            sheet_name="Historico",
-            index=False
-        )
+        resultado.to_excel(writer, sheet_name='Historico_Limpo', index=False)
 
         if not abc.empty:
 
-            abc.to_excel(
-                writer,
-                sheet_name="Curva_ABC",
-                index=False
-            )
+            abc.to_excel(writer, sheet_name='Curva_ABC', index=False)
 
     st.sidebar.divider()
 
     st.sidebar.download_button(
-        "📥 Baixar Excel",
+        "📥 Baixar Relatório Final (Excel)",
         output.getvalue(),
-        "relatorio_goinfra.xlsx"
-    )
-
-    csv = resultado.to_csv(index=False).encode("utf-8")
-
-    st.sidebar.download_button(
-        "📥 Baixar CSV",
-        csv,
-        "relatorio_goinfra.csv",
-        "text/csv"
+        "relatorio_goinfra_limpo.xlsx"
     )
