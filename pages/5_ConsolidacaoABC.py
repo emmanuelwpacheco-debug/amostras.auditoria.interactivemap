@@ -2,101 +2,110 @@ import streamlit as st
 import pandas as pd
 import io
 
-st.set_page_config(page_title="Consolidacao GOINFRA", layout="wide")
-st.title("📊 Consolidação Sequencial e Curva ABC")
+st.set_page_config(page_title="Consolidador de Histórico", layout="wide")
+st.title("📑 Consolidador de Histórico Acumulado e Aditivos")
 
 uploaded_files = st.sidebar.file_uploader(
-    "Carregue as medições (.xls ou .xlsx)", 
+    "Carregue as medições (ordene pela data de ocorrência)", 
     type=['xls', 'xlsx'], 
     accept_multiple_files=True
 )
 
 if uploaded_files:
-    dados_por_arquivo = {}
+    # Dicionário para armazenar os dados de cada Boletim de Medição (BM)
+    bms = {}
+    colunas_base = ['CÓDIGO', 'SERVIÇO', 'UNIDADE', 'PREÇO UNITÁRIO', 'QUANTIDADE TOTAL']
     
     for file in uploaded_files:
         try:
-            # Leitura robusta: ignora as 25 linhas de cabeçalho administrativo
+            # Leitura a partir da linha 26 (padrão GOINFRA)
             df = pd.read_excel(file, skiprows=25)
             
-            # 1. Limpeza de colunas: remove vazias e converte tudo para string limpa
-            df.columns = [str(c).strip() for c in df.columns]
-            df = df.loc[:, ~df.columns.str.contains('Unnamed|nan', case=False)]
+            # Limpeza de colunas
+            df.columns = [str(c).strip().upper() for c in df.columns]
+            df = df.loc[:, ~df.columns.str.contains('UNNAMED|NAN', case=False)]
             
-            # 2. Filtro: Mantém apenas linhas que tenham o código do serviço (coluna 0)
-            df = df.dropna(subset=[df.columns[0]])
+            # Identificação das colunas críticas
+            # Adaptamos para buscar nomes que contenham as palavras-chave
+            def buscar_col(termos):
+                for c in df.columns:
+                    if any(t in c for t in termos): return c
+                return None
+
+            c_cod = buscar_col(['CÓDIGO', 'ITEM'])
+            c_serv = buscar_col(['SERVIÇO', 'DESCRIÇÃO'])
+            c_unid = buscar_col(['UNIDADE', 'UNID'])
+            c_pre = buscar_col(['PREÇO UNITÁRIO', 'VALOR UNIT'])
+            c_qtd_orc = buscar_col(['QUANTIDADE', 'QTD. ORC'])
             
-            if not df.empty:
-                nome_med = file.name.replace('.xls', '').replace('.xlsx', '')
-                dados_por_arquivo[nome_med] = df
+            # Colunas da Medição Atual
+            c_qtd_bm = buscar_col(['DA MEDIÇÃO', 'QTD. MED'])
+            c_val_bm = buscar_col(['VALOR DA MED', 'VALOR MED'])
+            c_k0 = buscar_col(['K0', 'FATOR'])
+            c_reaj = buscar_col(['REAJUSTE'])
+
+            # Nome simplificado do BM baseado no arquivo
+            nome_bm = file.name.replace('.xls', '').replace('.xlsx', '')
+
+            # Seleção e renomeação para padronização
+            df_bm = df[[c_cod, c_serv, c_unid, c_pre, c_qtd_orc, c_qtd_bm, c_val_bm, c_k0, c_reaj]].copy()
+            df_bm.columns = ['CÓDIGO', 'SERVIÇO', 'UNIDADE', 'PREÇO UNITÁRIO', 'QTD_ORC', 
+                             f'QTD_{nome_bm}', f'VALOR_{nome_bm}', f'K0_{nome_bm}', f'REAJ_{nome_bm}']
+            
+            bms[nome_bm] = df_bm
+            
         except Exception as e:
-            st.error(f"Erro ao processar {file.name}: {e}")
+            st.error(f"Erro no arquivo {file.name}: {e}")
 
-    if dados_por_arquivo:
-        # Pega a lista de colunas do primeiro arquivo para mapeamento
-        exemplo_df = list(dados_por_arquivo.values())[0]
-        cols = exemplo_df.columns.tolist()
+    if bms:
+        # 1. Criar a Lista Mestre de Serviços (Unificando Aditivos)
+        # Concatenamos todos os códigos e serviços encontrados em todos os arquivos
+        lista_mestre = pd.concat([df[['CÓDIGO', 'SERVIÇO', 'UNIDADE', 'PREÇO UNITÁRIO', 'QTD_ORC']] for df in bms.values()])
+        # Remove duplicatas mantendo a última definição (útil se o preço mudar por aditivo)
+        lista_mestre = lista_mestre.drop_duplicates(subset=['CÓDIGO', 'SERVIÇO'], keep='last')
 
-        st.subheader("⚙️ Ajuste de Mapeamento")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: col_id = st.selectbox("Cód. Serviço", cols, index=0)
-        with c2: col_desc = st.selectbox("Descrição", cols, index=1 if len(cols)>1 else 0)
-        with c3: col_qtd = st.selectbox("Qtd Medição", cols, index=len(cols)-3 if len(cols)>3 else 0)
-        with c4: col_val = st.selectbox("Valor Medição", cols, index=len(cols)-2 if len(cols)>2 else 0)
+        # 2. Unir cada BM à Lista Mestre (Merge)
+        df_final = lista_mestre
+        for nome_bm, df_bm in bms.items():
+            # Pegamos apenas as colunas específicas daquela medição
+            colunas_medicao = ['CÓDIGO', 'SERVIÇO', f'QTD_{nome_bm}', f'VALOR_{nome_bm}', f'K0_{nome_bm}', f'REAJ_{nome_bm}']
+            df_final = pd.merge(df_final, df_bm[colunas_medicao], on=['CÓDIGO', 'SERVIÇO'], how='left')
 
-        if st.button("🚀 Gerar Consolidação"):
-            # Lista para o merge final
-            tabelas_limpas = []
-            
-            for nome, df in dados_por_arquivo.items():
-                # Extrai apenas as colunas necessárias e renomeia com o nome da medição
-                temp = df[[col_id, col_desc, col_qtd, col_val]].copy()
-                
-                # Converte valores para número (forçado)
-                temp[col_qtd] = pd.to_numeric(temp[col_qtd], errors='coerce').fillna(0)
-                temp[col_val] = pd.to_numeric(temp[col_val], errors='coerce').fillna(0)
-                
-                # Renomeia para identificar a medição (Ex: Qtd_BM01, Valor_BM01)
-                temp = temp.rename(columns={
-                    col_qtd: f"Qtd_{nome}",
-                    col_val: f"Valor_{nome}"
-                })
-                tabelas_limpas.append(temp)
+        # 3. Cálculos de Acumulado
+        col_qtds = [c for c in df_final.columns if 'QTD_' in c and 'ORC' not in c]
+        col_vals = [c for c in df_final.columns if 'VALOR_' in c]
+        col_reaj = [c for c in df_final.columns if 'REAJ_' in c]
 
-            # --- CONSOLIDAÇÃO SEQUENCIAL (Lado a Lado) ---
-            # Faz o merge de todos os arquivos baseados no Código e Descrição
-            df_consolidado = tabelas_limpas[0]
-            for i in range(1, len(tabelas_limpas)):
-                df_consolidado = pd.merge(
-                    df_consolidado, 
-                    tabelas_limpas[i], 
-                    on=[col_id, col_desc], 
-                    how='outer'
-                ).fillna(0)
+        df_final = df_final.fillna(0) # Transforma vazios em 0 para somar
+        
+        df_final['QUANTIDADE ACUMULADA'] = df_final[col_qtds].sum(axis=1)
+        df_final['VALOR ACUMULADO'] = df_final[col_vals].sum(axis=1)
+        df_final['VALOR REAJUSTE ACUMULADO'] = df_final[col_reaj].sum(axis=1)
 
-            # Cálculo do Acumulado (Soma horizontal das colunas de valor)
-            cols_valor = [c for c in df_consolidado.columns if 'Valor_' in c]
-            df_consolidado['VALOR_ACUMULADO'] = df_consolidado[cols_valor].sum(axis=1)
+        # 4. Tratamento de Unidades Construtivas
+        # Se Qtd, Unid e Preço são 0, é uma linha de grupo
+        def marcar_grupo(row):
+            if str(row['UNIDADE']) in ['0', 'nan', ''] and row['PREÇO UNITÁRIO'] == 0:
+                return "📂 GRUPO"
+            return "🔧 SERVIÇO"
+        
+        df_final['TIPO'] = df_final.apply(marcar_grupo, axis=1)
 
-            # --- EXIBIÇÃO ---
-            st.divider()
-            st.subheader("📋 Tabela Sequencial de Medições")
-            st.dataframe(df_consolidado, use_container_width=True)
+        # --- EXIBIÇÃO ---
+        st.subheader("📊 Histórico Acumulado Consolidado")
+        st.write("A tabela abaixo reflete todos os serviços, incluindo aditivos detectados.")
+        
+        # Estilização básica
+        st.dataframe(df_final, use_container_width=True)
 
-            # --- CURVA ABC ---
-            abc = df_consolidado[df_consolidado['VALOR_ACUMULADO'] > 0].copy()
-            abc = abc.sort_values(by='VALOR_ACUMULADO', ascending=False)
-            
-            total_geral = abc['VALOR_ACUMULADO'].sum()
-            abc['%_SIMPLES'] = (abc['VALOR_ACUMULADO'] / total_geral) * 100
-            abc['%_ACUM'] = abc['%_SIMPLES'].cumsum()
-            abc['CLASSE'] = abc['%_ACUM'].apply(lambda x: 'A' if x <= 80 else ('B' if x <= 95 else 'C'))
-
-            st.subheader("🏆 Curva ABC (Baseada no Acumulado)")
-            st.metric("Total Geral Medido", f"R$ {total_geral:,.2f}")
-            st.dataframe(abc[[col_id, col_desc, 'VALOR_ACUMULADO', '%_ACUM', 'CLASSE']], use_container_width=True)
-
-            # Exportação
-            output = io.BytesIO()
-            df_consolidado.to_excel(output, index=False)
-            st.download_button("📥 Baixar Planilha Consolidada", output.getvalue(), "consolidacao_goinfra.xlsx")
+        # Download
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_final.to_excel(writer, index=False, sheet_name='Historico_Acumulado')
+        
+        st.download_button(
+            "📥 Baixar Histórico Completo", 
+            output.getvalue(), 
+            "historico_consolidado_obras.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
