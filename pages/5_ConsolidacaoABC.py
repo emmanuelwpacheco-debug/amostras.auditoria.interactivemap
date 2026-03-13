@@ -3,6 +3,7 @@ import pandas as pd
 import io
 import re
 import unicodedata
+from difflib import get_close_matches
 
 st.set_page_config(page_title="Consolidador GOINFRA Profissional", layout="wide")
 st.title("📑 Consolidador de Histórico e Curva ABC")
@@ -13,123 +14,131 @@ uploaded_files = st.sidebar.file_uploader(
     accept_multiple_files=True
 )
 
-def normalizar(txt):
+def normalizar_texto(txt):
     if pd.isna(txt): return ""
-    return unicodedata.normalize('NFKD', str(txt)).encode('ASCII', 'ignore').decode('ASCII').upper().strip()
+    txt = str(txt).upper().strip()
+    txt = unicodedata.normalize('NFKD', txt).encode('ASCII', 'ignore').decode('ASCII')
+    txt = re.sub(r'[^A-Z0-9]', '', txt) # Remove TUDO que não for letra ou número
+    return txt
+
+def extrair_id_medicao(file):
+    try:
+        engine = 'xlrd' if file.name.endswith('.xls') else 'openpyxl'
+        df_cabecalho = pd.read_excel(file, nrows=12, usecols="J", header=None, engine=engine)
+        texto_j12 = str(df_cabecalho.iloc[11, 0]).strip()
+        numeros = re.findall(r'(\d+)', texto_j12)
+        return (int(numeros[0]), f"BM_{int(numeros[0]):02d}") if numeros else (999, "BM_Erro")
+    except:
+        return 999, "BM_Erro"
 
 def formatar_br(valor):
-    try:
-        v = float(valor)
-        return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except: return "0,00"
+    if pd.isna(valor) or valor == 0: return "0,00"
+    return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 if uploaded_files:
     processados = []
     for file in uploaded_files:
-        try:
-            engine = 'xlrd' if file.name.endswith('.xls') else 'openpyxl'
-            # Pega o número da medição na célula J12 (índices 11, 9)
-            df_cab = pd.read_excel(file, nrows=13, usecols="J", header=None, engine=engine)
-            num = re.findall(r'(\d+)', str(df_cab.iloc[11, 0]))
-            n = int(num[0]) if num else 999
-            processados.append({'file': file, 'ordem': n, 'label': f"BM_{n:02d}"})
-        except: pass
+        ordem, label = extrair_id_medicao(file)
+        processados.append({'file': file, 'ordem': ordem, 'label': label})
     
     processados = sorted(processados, key=lambda x: x['ordem'])
 
-    # 1. ESTRUTURA MESTRE (Baseada na última medição carregada)
+    # 1. Estrutura Mestre (Última Medição)
     try:
         u_item = processados[-1]
-        eng_u = 'xlrd' if u_item['file'].name.endswith('.xls') else 'openpyxl'
-        # Lemos sem cabeçalho (header=None) para evitar nomes como 'Unnamed'
-        df_raw = pd.read_excel(u_item['file'], skiprows=25, header=None, engine=eng_u)
+        eng_m = 'xlrd' if u_item['file'].name.endswith('.xls') else 'openpyxl'
+        df_m = pd.read_excel(u_item['file'], skiprows=25, engine=eng_m)
         
-        # Filtro de segurança: para quando encontrar o resumo final
-        corte = df_raw[df_raw.iloc[:, 0].astype(str).str.contains("TOTAL|MÃO-DE-OBRA", case=False, na=False)].index
-        if not corte.empty: df_raw = df_raw.iloc[:corte[0]]
+        # Corte na linha de totalização
+        corte = df_m[df_m.iloc[:, 0].astype(str).str.contains("TOTAL|MAO-DE-OBRA", case=False, na=False)].index
+        if not corte.empty: df_m = df_m.iloc[:corte[0]]
 
-        # Montamos o esqueleto usando índices de coluna fixos
-        resultado = pd.DataFrame()
-        resultado['COD'] = df_raw.iloc[:, 0].astype(str).replace('nan', '')
-        resultado['SERVICO'] = df_raw.iloc[:, 1].astype(str).replace('nan', '')
-        resultado['UNID'] = df_raw.iloc[:, 2].astype(str).replace('nan', '')
-        resultado['PRECO_UNIT'] = pd.to_numeric(df_raw.iloc[:, 3], errors='coerce').fillna(0)
-        resultado['QTD_ORC'] = pd.to_numeric(df_raw.iloc[:, 4], errors='coerce').fillna(0)
+        df_m.columns = [str(c).strip().upper() for c in df_m.columns]
+        df_m = df_m.loc[:, ~df_m.columns.str.contains('UNNAMED|NAN', case=False)]
         
-        # Chave única para busca (Código + Nome)
-        resultado['KEY'] = resultado['COD'].apply(normalizar) + resultado['SERVICO'].apply(normalizar)
+        resultado = df_m.iloc[:, [0, 1, 2, 3, 4]].copy()
+        resultado.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
+        
+        # Chave Ultra Limpa (Apenas letras e números)
+        resultado['CHAVE_LIMPA'] = (resultado['COD'].apply(normalizar_texto) + 
+                                   resultado['SERVICO'].apply(normalizar_texto))
         resultado['ORDEM_ORIGINAL'] = range(len(resultado))
     except Exception as e:
-        st.error(f"Erro ao processar estrutura: {e}")
+        st.error(f"Erro na leitura mestre: {e}")
         st.stop()
 
-    # 2. BUSCA DINÂMICA DE VALORES PARCIAIS
+    # 2. Processamento das Medições
+    lista_chaves_mestre = resultado['CHAVE_LIMPA'].tolist()
+
     for item in processados:
         try:
             eng = 'xlrd' if item['file'].name.endswith('.xls') else 'openpyxl'
-            df_bm = pd.read_excel(item['file'], skiprows=25, header=None, engine=eng)
+            df_bm = pd.read_excel(item['file'], skiprows=25, engine=eng)
+            df_bm.columns = [str(c).strip().upper() for c in df_bm.columns]
             
-            # Chave na medição atual
-            df_bm['KEY'] = df_bm.iloc[:, 0].astype(str).apply(normalizar) + df_bm.iloc[:, 1].astype(str).apply(normalizar)
+            # Criar chave de comparação para cada linha da medição
+            df_bm['CHAVE_ATUAL'] = (df_bm.iloc[:, 0].apply(normalizar_texto) + 
+                                    df_bm.iloc[:, 1].apply(normalizar_texto))
             
-            # Dicionários de busca usando índices fixos das colunas da GOINFRA:
-            # Coluna 5 (F): Qtd Medição | Coluna 6 (G): Valor Medição | Coluna 8 (I): Reajuste
-            dict_qtd = pd.Series(df_bm.iloc[:, 5].values, index=df_bm['KEY']).to_dict()
-            dict_val = pd.Series(df_bm.iloc[:, 6].values, index=df_bm['KEY']).to_dict()
-            dict_reaj = {}
-            if df_bm.shape[1] > 8:
-                dict_reaj = pd.Series(df_bm.iloc[:, 8].values, index=df_bm['KEY']).to_dict()
+            # --- LÓGICA DE FUZZY MATCHING ---
+            def encontrar_melhor_chave(chave_atual):
+                if chave_atual in lista_chaves_mestre: return chave_atual
+                matches = get_close_matches(chave_atual, lista_chaves_mestre, n=1, cutoff=0.8)
+                return matches[0] if matches else None
 
-            label = item['label']
-            resultado[f'QTD_{label}'] = resultado['KEY'].map(dict_qtd).apply(pd.to_numeric, errors='coerce').fillna(0)
-            resultado[f'VALOR_{label}'] = resultado['KEY'].map(dict_val).apply(pd.to_numeric, errors='coerce').fillna(0)
-            resultado[f'REAJ_{label}'] = resultado['KEY'].map(dict_reaj).apply(pd.to_numeric, errors='coerce').fillna(0)
-        except:
-            st.warning(f"Atenção ao ler {item['label']}: Verifique a estrutura.")
+            df_bm['CHAVE_JOIN'] = df_bm['CHAVE_ATUAL'].apply(encontrar_melhor_chave)
+            
+            # Agrupar valores para as colunas da medição
+            cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
+            c_reaj = next((c for c in df_bm.columns if 'REAJUSTE' in c or 'REAJUSTAMENTO' in c), None)
+            
+            med_resumo = pd.DataFrame()
+            med_resumo['CHAVE_JOIN'] = df_bm['CHAVE_JOIN']
+            if len(cols_med) >= 2:
+                med_resumo[f'QTD_{item["label"]}'] = pd.to_numeric(df_bm[cols_med[0]], errors='coerce').fillna(0)
+                med_resumo[f'VALOR_{item["label"]}'] = pd.to_numeric(df_bm[cols_med[1]], errors='coerce').fillna(0)
+            if c_reaj:
+                med_resumo[f'REAJ_{item["label"]}'] = pd.to_numeric(df_bm[c_reaj], errors='coerce').fillna(0)
+            
+            # Somar valores caso haja repetição de chaves
+            med_resumo = med_resumo.dropna(subset=['CHAVE_JOIN']).groupby('CHAVE_JOIN').sum().reset_index()
+            
+            resultado = pd.merge(resultado, med_resumo, left_on='CHAVE_LIMPA', right_on='CHAVE_JOIN', how='left').drop(columns=['CHAVE_JOIN'])
+            
+        except Exception as e:
+            st.warning(f"Erro no arquivo {item['file'].name}: {e}")
 
-    # 3. CÁLCULOS TOTAIS
-    cols_v = [c for c in resultado.columns if 'VALOR_BM' in c]
-    cols_r = [c for c in resultado.columns if 'REAJ_BM' in c]
+    # 3. Consolidação e Exibição
+    resultado = resultado.sort_values('ORDEM_ORIGINAL').fillna(0)
+    
+    # Identificar colunas dinâmicas para soma
+    c_qtds = [c for c in resultado.columns if 'QTD_BM' in c]
+    c_vals = [c for c in resultado.columns if 'VALOR_BM' in c]
+    c_reajs = [c for c in resultado.columns if 'REAJ_BM' in c]
 
-    resultado['VALOR_ACUMULADO'] = resultado[cols_v].sum(axis=1)
-    resultado['REAJUSTE_ACUMULADO'] = resultado[cols_r].sum(axis=1)
+    resultado['QTD_ACUMULADA'] = resultado[c_qtds].sum(axis=1)
+    resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
+    resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
     resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
 
-    # --- EXIBIÇÃO ---
+    # --- DATAFRAME FINAL ---
+    df_show = resultado.drop(columns=['CHAVE_LIMPA', 'ORDEM_ORIGINAL'])
     st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
-    df_final = resultado.drop(columns=['KEY', 'ORDEM_ORIGINAL'])
-    
-    # Estilo: destaca linhas que são títulos (sem preço unitário)
-    st.dataframe(
-        df_final.style.apply(lambda r: ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(r) if r['PRECO_UNIT'] == 0 else [''] * len(r), axis=1)
-        .format({c: formatar_br for c in df_final.select_dtypes(include=['float64']).columns}),
-        use_container_width=True
-    )
+    st.dataframe(df_show.style.apply(lambda r: ['background-color: #f0f2f6; font-weight: bold'] * len(r) if r['PRECO_UNIT'] == 0 else [''] * len(r), axis=1).format({col: formatar_br for col in df_show.select_dtypes(include=['float64']).columns}), use_container_width=True)
 
     # --- CURVA ABC ---
     st.divider()
     abc = resultado[resultado['PRECO_UNIT'] > 0].copy()
-    abc = abc[abc['TOTAL_GERAL'] > 0.01].sort_values(by='TOTAL_GERAL', ascending=False)
-    
     if not abc.empty:
-        st.subheader("📈 Curva ABC (Somente Serviços)")
-        total_global = abc['TOTAL_GERAL'].sum()
-        abc['%_ACUM'] = ((abc['TOTAL_GERAL'] / total_global) * 100).cumsum()
+        st.subheader("📈 Análise de Curva ABC")
+        abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
+        total_g = abc['TOTAL_GERAL'].sum()
+        abc['%_ACUM'] = ((abc['TOTAL_GERAL'] / total_g) * 100).cumsum()
         abc['CLASSE'] = abc['%_ACUM'].apply(lambda p: 'A' if p <= 80.1 else ('B' if p <= 95.1 else 'C'))
         
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Serviços (PI)", f"R$ {formatar_br(abc['VALOR_ACUMULADO'].sum())}")
-        m2.metric("Reajuste Acum.", f"R$ {formatar_br(abc['REAJUSTE_ACUMULADO'].sum())}")
-        m3.metric("Total Geral", f"R$ {formatar_br(total_global)}")
-
-        st.dataframe(
-            abc[['COD', 'SERVICO', 'VALOR_ACUMULADO', 'REAJUSTE_ACUMULADO', 'TOTAL_GERAL', 'CLASSE']]
-            .style.format({c: formatar_br for c in ['VALOR_ACUMULADO', 'REAJUSTE_ACUMULADO', 'TOTAL_GERAL']}),
-            use_container_width=True
-        )
-
-    # Exportação
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_final.to_excel(writer, index=False)
-    st.sidebar.download_button("📥 Baixar Relatório", output.getvalue(), "historico_consolidado.xlsx")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Serviços (PI)", f"R$ {formatar_br(abc['VALOR_ACUMULADO'].sum())}")
+        c2.metric("Total Reajuste", f"R$ {formatar_br(abc['REAJUSTE_ACUMULADO'].sum())}")
+        c3.metric("Total Global", f"R$ {formatar_br(total_g)}")
+        
+        st.dataframe(abc[['COD', 'SERVICO', 'UNID', 'VALOR_ACUMULADO', 'REAJUSTE_ACUMULADO', 'TOTAL_GERAL', 'CLASSE']].style.format({col: formatar_br for col in ['VALOR_ACUMULADO', 'REAJUSTE_ACUMULADO', 'TOTAL_GERAL']}), use_container_width=True)
