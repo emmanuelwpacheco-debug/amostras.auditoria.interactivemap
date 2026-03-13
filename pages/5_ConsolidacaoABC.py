@@ -313,36 +313,7 @@ if uploaded_files:
             f"{len(abc[abc['CLASSE']=='A'])}"
         )
 
-        # gráfico Pareto
-
-        st.subheader("Curva de Pareto")
-
-        st.line_chart(
-            abc.set_index("COD")["%_ACUMULADO"]
-        )
-
-        # tabela
-
-        st.dataframe(
-            abc[
-                [
-                    "COD",
-                    "SERVICO",
-                    "UNID",
-                    "TOTAL_GERAL",
-                    "%_ACUMULADO",
-                    "CLASSE"
-                ]
-            ].style.format(
-                {
-                    "TOTAL_GERAL": formatar_br,
-                    "%_ACUMULADO": "{:.2f}%"
-                }
-            ),
-            use_container_width=True
-        )
-
-    # ==============================
+           # ==============================
     # Exportação
     # ==============================
 
