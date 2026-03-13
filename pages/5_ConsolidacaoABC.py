@@ -250,7 +250,47 @@ if uploaded_files:
         .format(format_dict_br),
         use_container_width=True
     )
+# ==============================
+# Indicadores do contrato
+# ==============================
 
+valor_contratado = (resultado['PRECO_UNIT'] * resultado['QTD_ORC']).sum()
+
+valor_medido = resultado['VALOR_ACUMULADO'].sum()
+
+valor_reajuste = resultado['REAJUSTE_ACUMULADO'].sum()
+
+valor_total_pago = valor_medido + valor_reajuste
+
+saldo_contrato = valor_contratado - valor_total_pago
+
+percentual_executado = 0
+if valor_contratado > 0:
+    percentual_executado = (valor_total_pago / valor_contratado) * 100
+
+st.subheader("📊 Situação do Contrato")
+
+k1, k2, k3, k4 = st.columns(4)
+
+k1.metric(
+    "Valor Contratado",
+    f"R$ {formatar_br(valor_contratado)}"
+)
+
+k2.metric(
+    "Valor Medido",
+    f"R$ {formatar_br(valor_medido)}"
+)
+
+k3.metric(
+    "Percentual Executado",
+    f"{percentual_executado:.2f}%"
+)
+
+k4.metric(
+    "Saldo Contratual",
+    f"R$ {formatar_br(saldo_contrato)}"
+)
     # ==============================
     # --- ABA: CURVA ABC ---
 st.divider()
