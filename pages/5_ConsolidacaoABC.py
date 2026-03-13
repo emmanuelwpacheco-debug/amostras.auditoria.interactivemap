@@ -252,67 +252,81 @@ if uploaded_files:
     )
 
     # ==============================
-    # Curva ABC
-    # ==============================
+    # --- ABA: CURVA ABC ---
+st.divider()
+st.subheader("📈 Análise de Curva ABC")
 
-    st.divider()
+abc = resultado[resultado['PRECO_UNIT'] > 0].copy()
+abc = abc[abc['TOTAL_GERAL'] > 0.01]
 
-    st.subheader("📈 Análise Curva ABC")
+if not abc.empty:
 
-    abc = resultado[resultado["PRECO_UNIT"] > 0].copy()
+    abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
 
-    abc = abc[abc["TOTAL_GERAL"] > 0.01]
+    total_global_abc = abc['TOTAL_GERAL'].sum()
 
-    if not abc.empty:
+    if total_global_abc == 0:
+        total_global_abc = 1
 
-        abc = abc.sort_values(
-            by="TOTAL_GERAL",
-            ascending=False
-        )
+    abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_global_abc) * 100
+    abc['%_ACUMULADO'] = abc['%_SIMPLES'].cumsum()
 
-        total_global_abc = max(
-            abc["TOTAL_GERAL"].sum(),
-            1
-        )
+    def classificar_abc(porc):
+        if porc <= 80.01:
+            return 'A'
+        if porc <= 95.01:
+            return 'B'
+        return 'C'
 
-        abc["%_SIMPLES"] = (
-            abc["TOTAL_GERAL"]
-            / total_global_abc
-        ) * 100
+    abc['CLASSE'] = abc['%_ACUMULADO'].apply(classificar_abc)
 
-        abc["%_ACUMULADO"] = abc["%_SIMPLES"].cumsum()
+    # Resumo Financeiro
+    m1, m2, m3 = st.columns(3)
 
-        def classificar_abc(p):
+    m1.metric(
+        "Total de Serviços (ABC)",
+        f"R$ {formatar_br(total_global_abc)}"
+    )
 
-            if p <= 80:
-                return "A"
+    m2.metric(
+        "Total Reajuste (Geral)",
+        f"R$ {formatar_br(resultado['REAJUSTE_ACUMULADO'].sum())}"
+    )
 
-            if p <= 95:
-                return "B"
+    m3.metric(
+        "Itens Classe A",
+        f"{len(abc[abc['CLASSE'] == 'A'])}"
+    )
 
-            return "C"
+    def color_classe(val):
 
-        abc["CLASSE"] = abc["%_ACUMULADO"].apply(classificar_abc)
+        color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
 
-        # métricas
+        return f'color: {color}; font-weight: bold'
 
-        m1, m2, m3 = st.columns(3)
-
-        m1.metric(
-            "Total Serviços",
-            f"R$ {formatar_br(total_global_abc)}"
-        )
-
-        m2.metric(
-            "Total Reajuste",
-            f"R$ {formatar_br(resultado['REAJUSTE_ACUMULADO'].sum())}"
-        )
-
-        m3.metric(
-            "Itens Classe A",
-            f"{len(abc[abc['CLASSE']=='A'])}"
-        )
-
+    st.dataframe(
+        abc[
+            [
+                'COD',
+                'SERVICO',
+                'UNID',
+                'VALOR_ACUMULADO',
+                'REAJUSTE_ACUMULADO',
+                'TOTAL_GERAL',
+                '%_ACUMULADO',
+                'CLASSE'
+            ]
+        ]
+        .style
+        .format({
+            'VALOR_ACUMULADO': formatar_br,
+            'REAJUSTE_ACUMULADO': formatar_br,
+            'TOTAL_GERAL': formatar_br,
+            '%_ACUMULADO': "{:.2f}%"
+        })
+        .applymap(color_classe, subset=['CLASSE']),
+        use_container_width=True
+    )
            # ==============================
     # Exportação
     # ==============================
