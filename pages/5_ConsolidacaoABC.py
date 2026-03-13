@@ -2,15 +2,26 @@ import streamlit as st
 import pandas as pd
 import io
 import re
+import unicodedata
 
 st.set_page_config(page_title="Consolidador GOINFRA Profissional", layout="wide")
-st.title("📑 Consolidador de Histórico (Versão Aditivos)")
+st.title("📑 Consolidador de Histórico e Curva ABC")
 
 uploaded_files = st.sidebar.file_uploader(
     "Carregue as medições (.xls ou .xlsx)", 
     type=['xls', 'xlsx'], 
     accept_multiple_files=True
 )
+
+def normalizar_texto(txt):
+    """Remove acentos, espaços extras e padroniza texto para comparação"""
+    if pd.isna(txt): return ""
+    txt = str(txt).upper().strip()
+    # Remove acentos
+    txt = unicodedata.normalize('NFKD', txt).encode('ASCII', 'ignore').decode('ASCII')
+    # Remove caracteres especiais e espaços duplos
+    txt = re.sub(r'\s+', ' ', txt)
+    return txt
 
 def extrair_id_medicao(file):
     try:
@@ -38,13 +49,13 @@ if uploaded_files:
     
     processados = sorted(processados, key=lambda x: x['ordem'])
 
-    # 1. Esqueleto Base (Última Medição com Aditivos)
+    # 1. Esqueleto Base (A partir da última medição)
     try:
         ultimo_item = processados[-1]
         eng_m = 'xlrd' if ultimo_item['file'].name.endswith('.xls') else 'openpyxl'
         df_m = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
         
-        # Corte dinâmico no final do orçamento
+        # Corte dinâmico (Total Mão-de-obra)
         linha_corte = df_m[df_m.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
         if not linha_corte.empty:
             df_m = df_m.iloc[:linha_corte[0]]
@@ -61,10 +72,10 @@ if uploaded_files:
         resultado = df_m[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
         resultado.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
         
-        # CORREÇÃO DA CHAVE: Convertendo para string antes de usar .str.strip()
+        # Chave de Join ultra-robusta
         resultado['CHAVE_JOIN'] = (
-            resultado['COD'].astype(str).str.strip() + 
-            resultado['SERVICO'].astype(str).str.strip()
+            resultado['COD'].apply(normalizar_texto) + 
+            resultado['SERVICO'].apply(normalizar_texto)
         )
         resultado['ORDEM_ORIGINAL'] = range(len(resultado))
         
@@ -72,7 +83,7 @@ if uploaded_files:
         st.error(f"Erro na estrutura mestre: {e}")
         st.stop()
 
-    # 2. Integração de Dados por "Matching"
+    # 2. Integração de Dados com Matching Refinado
     for item in processados:
         try:
             eng = 'xlrd' if item['file'].name.endswith('.xls') else 'openpyxl'
@@ -80,13 +91,14 @@ if uploaded_files:
             df_bm.columns = [str(c).strip().upper() for c in df_bm.columns]
             label = item['label']
             
+            # Localizar colunas de medição e reajuste
             cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
             c_reaj = next((c for c in df_bm.columns if 'REAJUSTE' in c or 'REAJUSTAMENTO' in c), None)
             
-            # Criar chave no arquivo da medição atual (mesma lógica robusta)
+            # Criar chave idêntica na medição atual
             df_bm['CHAVE_JOIN'] = (
-                df_bm.iloc[:, 0].astype(str).str.strip() + 
-                df_bm.iloc[:, 1].astype(str).str.strip()
+                df_bm.iloc[:, 0].apply(normalizar_texto) + 
+                df_bm.iloc[:, 1].apply(normalizar_texto)
             )
             
             med_cols = pd.DataFrame()
@@ -98,68 +110,75 @@ if uploaded_files:
             if c_reaj:
                 med_cols[f'REAJ_{label}'] = pd.to_numeric(df_bm[c_reaj], errors='coerce').fillna(0)
             
-            # Remove duplicatas da medição para não inflar o merge
-            med_cols = med_cols.drop_duplicates(subset=['CHAVE_JOIN'])
+            # Consolida duplicatas internas da medição antes do merge
+            med_cols = med_cols.groupby('CHAVE_JOIN').sum().reset_index()
             
+            # Merge por chave de texto normalizado
             resultado = pd.merge(resultado, med_cols, on='CHAVE_JOIN', how='left')
             
         except Exception as e:
-            st.warning(f"Erro no matching do arquivo {item['file'].name}: {e}")
+            st.warning(f"Aviso no arquivo {item['file'].name}: {e}")
 
-    # 3. Consolidação Final
-    resultado = resultado.sort_values('ORDEM_ORIGINAL').drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL']).fillna(0)
+    # 3. Consolidação e Cálculos
+    resultado = resultado.sort_values('ORDEM_ORIGINAL').fillna(0)
     
-    c_qtds = [c for c in resultado.columns if 'QTD_' in c]
-    c_vals = [c for c in resultado.columns if 'VALOR_' in c]
-    c_reajs = [c for c in resultado.columns if 'REAJ_' in c]
+    c_qtds = [c for c in resultado.columns if 'QTD_BM' in c]
+    c_vals = [c for c in resultado.columns if 'VALOR_BM' in c]
+    c_reajs = [c for c in resultado.columns if 'REAJ_BM' in c]
 
     resultado['QTD_ACUMULADA'] = resultado[c_qtds].sum(axis=1)
     resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
     resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
     resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
 
-    # --- TELA: HISTÓRICO ---
-    st.subheader(f"✅ Histórico Consolidado com Aditivos ({len(processados)} Medições)")
+    # --- EXIBIÇÃO ---
+    st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
+    
     colunas_numericas = resultado.select_dtypes(include=['float64', 'int64']).columns
     format_dict_br = {col: formatar_br for col in colunas_numericas}
 
-    def format_rows(row):
+    def destacar_titulos(row):
         if row['PRECO_UNIT'] == 0:
             return ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(row)
         return [''] * len(row)
 
-    st.dataframe(resultado.style.apply(format_rows, axis=1).format(format_dict_br), use_container_width=True)
+    # Removemos a CHAVE_JOIN da visualização final
+    df_visualizacao = resultado.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL'])
 
-    # --- ABA: CURVA ABC ---
+    st.dataframe(
+        df_visualizacao.style.apply(destacar_titulos, axis=1).format(format_dict_br), 
+        use_container_width=True
+    )
+
+    # --- CURVA ABC ---
     st.divider()
-    st.subheader("📈 Análise de Curva ABC")
+    st.subheader("📈 Análise de Curva ABC (Somente Serviços)")
     
     abc = resultado[resultado['PRECO_UNIT'] > 0].copy()
     abc = abc[abc['TOTAL_GERAL'] > 0.01]
     
     if not abc.empty:
         abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
-        total_pi_abc = abc['VALOR_ACUMULADO'].sum()
-        total_reajuste_abc = abc['REAJUSTE_ACUMULADO'].sum()
-        total_global_abc = abc['TOTAL_GERAL'].sum()
+        total_pi = abc['VALOR_ACUMULADO'].sum()
+        total_reaj = abc['REAJUSTE_ACUMULADO'].sum()
+        total_global = abc['TOTAL_GERAL'].sum()
         
-        abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_global_abc) * 100
+        abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_global) * 100
         abc['%_ACUMULADO'] = abc['%_SIMPLES'].cumsum()
-        
         abc['CLASSE'] = abc['%_ACUMULADO'].apply(lambda p: 'A' if p <= 80.01 else ('B' if p <= 95.01 else 'C'))
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Serviços (PI)", f"R$ {formatar_br(total_pi_abc)}")
-        m2.metric("Total Reajuste", f"R$ {formatar_br(total_reajuste_abc)}")
-        m3.metric("Total Global", f"R$ {formatar_br(total_global_abc)}")
+        m1.metric("Total Serviços (PI)", f"R$ {formatar_br(total_pi)}")
+        m2.metric("Total Reajuste", f"R$ {formatar_br(total_reaj)}")
+        m3.metric("Total Global", f"R$ {formatar_br(total_global)}")
         m4.metric("Itens Classe A", f"{len(abc[abc['CLASSE'] == 'A'])}")
 
         st.dataframe(
             abc[['COD', 'SERVICO', 'UNID', 'VALOR_ACUMULADO', 'REAJUSTE_ACUMULADO', 'TOTAL_GERAL', '%_ACUMULADO', 'CLASSE']]
             .style.format({
-                'VALOR_ACUMULADO': formatar_br,
-                'REAJUSTE_ACUMULADO': formatar_br,
-                'TOTAL_GERAL': formatar_br,
+                'VALOR_ACUMULADO': formatar_br, 
+                'REAJUSTE_ACUMULADO': formatar_br, 
+                'TOTAL_GERAL': formatar_br, 
                 '%_ACUMULADO': "{:.2f}%"
             }).applymap(lambda v: f'color: {"#d9534f" if v=="A" else ("#f0ad4e" if v=="B" else "#5cb85c")}; font-weight: bold', subset=['CLASSE']),
             use_container_width=True
@@ -168,5 +187,5 @@ if uploaded_files:
     # Exportação
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        resultado.to_excel(writer, sheet_name='Historico_Final', index=False)
-    st.sidebar.download_button("📥 Baixar Relatório Final", output.getvalue(), "relatorio_final_aditivo.xlsx")
+        df_visualizacao.to_excel(writer, sheet_name='Historico_Final', index=False)
+    st.sidebar.download_button("📥 Baixar Relatório Final", output.getvalue(), "relatorio_final_completo.xlsx")
