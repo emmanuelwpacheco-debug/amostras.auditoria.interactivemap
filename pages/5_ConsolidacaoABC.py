@@ -113,10 +113,22 @@ if uploaded_files:
         except Exception as e:
             st.warning(f"Aviso: Não foi possível alinhar os dados de {item['label']}. Verifique o formato.")
 
-    # 3. Consolidação Final
-    # Reorganiza, remove as chaves de controle e preenche vazios com zero
-    resultado = resultado.sort_values('ORDEM_ORIGINAL').drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL']).fillna(0)
+    # --- 3. CONSOLIDAÇÃO FINAL (Ajustada para não zerar descrições) ---
     
+    # 1. Primeiro, garantimos que a ordem seja mantida
+    resultado = resultado.sort_values('ORDEM_ORIGINAL')
+
+    # 2. Identificamos quais colunas são de valores (onde o zero é bem-vindo)
+    cols_para_zerar = [c for c in resultado.columns if any(x in c for x in ['QTD_', 'VALOR_', 'REAJ_', 'PRECO_UNIT', 'QTD_ORC'])]
+    
+    # Preenchemos com 0 apenas as colunas numéricas
+    resultado[cols_para_zerar] = resultado[cols_para_zerar].fillna(0)
+    
+    # Nas colunas de texto, preenchemos com vazio "" em vez de 0
+    cols_texto = ['COD', 'SERVICO', 'UNID']
+    resultado[cols_texto] = resultado[cols_texto].fillna("")
+
+    # 3. Cálculos de acumulados (apenas se houver colunas para somar)
     c_qtds = [c for c in resultado.columns if 'QTD_BM' in c]
     c_vals = [c for c in resultado.columns if 'VALOR_BM' in c]
     c_reajs = [c for c in resultado.columns if 'REAJ_BM' in c]
@@ -126,19 +138,31 @@ if uploaded_files:
     resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
     resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
 
-    # --- FIM DA SUBSTITUIÇÃO ---
+    # 4. Limpeza final das colunas de controle
+    df_final = resultado.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL'])
 
     # --- TELA: HISTÓRICO ---
     st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
-    colunas_numericas = resultado.select_dtypes(include=['float64', 'int64']).columns
-    format_dict_br = {col: formatar_br for col in colunas_numericas}
+    
+    # Selecionamos apenas colunas que REALMENTE são números para formatar como Moeda
+    # Isso impede que a coluna 'SERVICO' seja formatada como 0,00
+    colunas_para_formatar = df_final.select_dtypes(include=['float64', 'int64']).columns
+    format_dict_br = {col: formatar_br for col in colunas_para_formatar}
 
     def format_rows(row):
-        if row['PRECO_UNIT'] == 0:
-            return ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(row)
+        # Se não houver preço unitário, pintamos a linha como título
+        try:
+            p_unit = float(row['PRECO_UNIT'])
+            if p_unit == 0:
+                return ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(row)
+        except:
+            pass
         return [''] * len(row)
 
-    st.dataframe(resultado.style.apply(format_rows, axis=1).format(format_dict_br), use_container_width=True)
+    st.dataframe(
+        df_final.style.apply(format_rows, axis=1).format(format_dict_br), 
+        use_container_width=True
+    )
 
     # --- ABA: CURVA ABC ---
     st.divider()
