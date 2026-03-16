@@ -48,11 +48,29 @@ if uploaded_files:
         df_m = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
         
         # Corte de rodapé
-        linha_corte = df_m[df_m.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
-        if not linha_corte.empty:
-            df_m = df_m.iloc[:linha_corte[0]]
+      # --- AJUSTE PARA MANTER TOTAIS ---
+        # Em vez de cortar, vamos identificar o fim dos serviços mas manter o que vem abaixo
+        # Se preferir manter tudo até o final da folha:
+        df_m = df_m.copy() 
 
-        df_m.columns = [str(c).strip().upper() for c in df_m.columns]
+        c_cod  = df_m.columns[0]
+        c_serv = df_m.columns[9] # Descrição na Coluna J
+        c_unid = df_m.columns[10]
+        c_precu = df_m.columns[11]
+        c_qtd_orc = df_m.columns[12]
+        
+        resultado = df_m[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
+        resultado.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
+        
+        # Tratamento especial para as linhas de TOTAL
+        resultado['SERVICO'] = resultado['SERVICO'].astype(str).replace(['nan', 'None'], '')
+        
+        # CHAVE_JOIN robusta: se não tiver código (caso dos Totais), usa só o nome do Serviço
+        resultado['CHAVE_JOIN'] = (
+            resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
+            resultado['SERVICO'].astype(str).str.strip().str.upper()
+        )
+        resultado['ORDEM_ORIGINAL'] = range(len(resultado))
         
        # --- NOVO MAPEAMENTO FIXO (GOINFRA) ---
         # Usamos .columns[i] para garantir que pegamos a coluna física correta
@@ -170,21 +188,25 @@ if uploaded_files:
         use_container_width=True
     )
 
-    # --- ABA: CURVA ABC ---
+   # --- ABA: CURVA ABC (Lógica Corrigida) ---
     st.divider()
-    st.subheader("📈 Análise de Curva ABC (Somente Serviços)")
+    st.subheader("📈 Análise de Curva ABC (Serviços Executados)")
     
-    # IMPORTANTE: Filtramos apenas serviços reais para a ABC
-    abc = resultado[resultado['PRECO_UNIT'] > 0].copy()
-    abc = abc[abc['TOTAL_GERAL'] > 0.01]
+    # 1. Filtro rigoroso: Apenas itens que são serviços (possuem unidade e preço unitário > 0)
+    # Isso remove as linhas de 'TOTAL' e 'SUBTOTAL' da soma da curva para não duplicar
+    abc = resultado[
+        (resultado['PRECO_UNIT'] > 0) & 
+        (resultado['UNID'] != "") & 
+        (resultado['TOTAL_GERAL'] > 0.01)
+    ].copy()
     
     if not abc.empty:
         abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
         
-        # Somas baseadas apenas nos serviços (evita duplicidade dos títulos)
+        # Totais baseados apenas nos itens de serviço (PI e Reajuste reais)
         total_pi_abc = abc['VALOR_ACUMULADO'].sum()
         total_reajuste_abc = abc['REAJUSTE_ACUMULADO'].sum()
-        total_global_abc = abc['TOTAL_GERAL'].sum()
+        total_global_abc = total_pi_abc + total_reajuste_abc
         
         abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_global_abc) * 100
         abc['%_ACUMULADO'] = abc['%_SIMPLES'].cumsum()
@@ -196,28 +218,11 @@ if uploaded_files:
         
         abc['CLASSE'] = abc['%_ACUMULADO'].apply(classificar_abc)
 
-        # Resumo Financeiro Corrigido
-        m1, m2, m3, m4 = st.columns(4)
+        # Resumo Financeiro no Topo da ABC
+        m1, m2, m3 = st.columns(3)
         m1.metric("Total Serviços (PI)", f"R$ {formatar_br(total_pi_abc)}")
         m2.metric("Total Reajuste", f"R$ {formatar_br(total_reajuste_abc)}")
-        m3.metric("Total Global (PI + Reaj)", f"R$ {formatar_br(total_global_abc)}")
-        m4.metric("Itens Classe A", f"{len(abc[abc['CLASSE'] == 'A'])}")
-
-        def color_classe(val):
-            color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
-            return f'color: {color}; font-weight: bold'
-
-        st.dataframe(
-            abc[['COD', 'SERVICO', 'UNID', 'VALOR_ACUMULADO', 'REAJUSTE_ACUMULADO', 'TOTAL_GERAL', '%_ACUMULADO', 'CLASSE']]
-            .style.format({
-                'VALOR_ACUMULADO': formatar_br,
-                'REAJUSTE_ACUMULADO': formatar_br,
-                'TOTAL_GERAL': formatar_br,
-                '%_ACUMULADO': "{:.2f}%"
-            })
-            .applymap(color_classe, subset=['CLASSE']),
-            use_container_width=True
-        )
+        m3.metric("Total Global Consolidado", f"R$ {formatar_br(total_global_abc)}")
 
     # Exportação Final
     output = io.BytesIO()
