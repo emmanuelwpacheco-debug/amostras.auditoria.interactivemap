@@ -85,38 +85,31 @@ if uploaded_files:
         try:
             eng = 'xlrd' if item['file'].name.endswith('.xls') else 'openpyxl'
             df_bm = pd.read_excel(item['file'], skiprows=25, engine=eng)
-            df_bm.columns = [str(c).strip().upper() for c in df_bm.columns]
             label = item['label']
             
-         # Criamos a chave usando o índice 0 e o índice 9 (Coluna J)
-            df_bm['CHAVE_JOIN'] = (
-                df_bm.iloc[:, 0].astype(str).str.strip().str.upper() + "_" + 
-                df_bm.iloc[:, 9].astype(str).str.strip().str.upper()
-            )
+            # Criamos um DataFrame temporário para a medição atual
+            temp_med = pd.DataFrame()
             
-            cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
-            c_reaj = next((c for c in df_bm.columns if 'REAJUSTE' in c or 'REAJUSTAMENTO' in c), None)
+            # Identificamos a posição de cada serviço na planilha atual
+            temp_med['COD_TEMP'] = df_bm.iloc[:, 0].astype(str).str.strip()
+            temp_med['VALOR_UNIT_TEMP'] = pd.to_numeric(df_bm.iloc[:, 11], errors='coerce').fillna(0)
             
-            # ATENÇÃO: Pegamos APENAS a chave e as colunas de valor/qtd
-            # Não pegamos a coluna 'SERVICO' daqui para não sobrescrever a mestre
-            med_dados = pd.DataFrame()
-            med_dados['CHAVE_JOIN'] = df_bm['CHAVE_JOIN']
+            # COLUNAS DE VALOR (Índice 16) e REAJUSTE (Índice 18)
+            temp_med[f'VALOR_{label}'] = pd.to_numeric(df_bm.iloc[:, 16], errors='coerce').fillna(0)
+            temp_med[f'REAJ_{label}'] = pd.to_numeric(df_bm.iloc[:, 18], errors='coerce').fillna(0)
             
-            if len(cols_med) >= 2:
-                med_dados[f'QTD_{label}'] = pd.to_numeric(df_bm[cols_med[0]], errors='coerce')
-                med_dados[f'VALOR_{label}'] = pd.to_numeric(df_bm[cols_med[1]], errors='coerce')
+            # A MÁGICA: Criamos a CHAVE_JOIN baseada na posição (index) 
+            # Isso garante que a 2ª "Pavimentação" da BM pegue a 2ª "Pavimentação" do Mestre
+            temp_med['CHAVE_JOIN'] = temp_med.index.astype(str) + "_" + temp_med['COD_TEMP']
             
-            if c_reaj:
-                med_dados[f'REAJ_{label}'] = pd.to_numeric(df_bm[c_reaj], errors='coerce')
+            # Selecionamos apenas as colunas de dados
+            temp_med = temp_med[['CHAVE_JOIN', f'VALOR_{label}', f'REAJ_{label}']]
             
-            # Removemos duplicatas da medição antes de unir
-            med_dados = med_dados.drop_duplicates(subset=['CHAVE_JOIN'])
-            
-            # Unimos apenas os valores ao nosso esqueleto mestre
-            resultado = pd.merge(resultado, med_dados, on='CHAVE_JOIN', how='left')
+            # Merge exato pela posição
+            resultado = pd.merge(resultado, temp_med, on='CHAVE_JOIN', how='left')
             
         except Exception as e:
-            st.warning(f"Aviso em {item['label']}: {e}")
+            st.warning(f"Erro ao integrar {item['label']}: {e}")
 
     # 3. CONSOLIDAÇÃO E LIMPEZA (A prova de falhas)
     
