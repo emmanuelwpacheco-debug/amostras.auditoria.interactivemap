@@ -41,25 +41,35 @@ if uploaded_files:
 
     # --- INÍCIO DA SUBSTITUIÇÃO ---
 
-    # 1. ESQUELETO MESTRE (A "Verdade" vem daqui)
+   # 1. ESQUELETO MESTRE (A "Verdade" vem daqui)
     try:
         ultimo_item = processados[-1]
         eng_m = 'xlrd' if ultimo_item['file'].name.endswith('.xls') else 'openpyxl'
-        df_m = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
         
-        # Corte de rodapé
-        linha_corte = df_m[df_m.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
-        if not linha_corte.empty:
-            df_m = df_m.iloc[:linha_corte[0]]
+        # Lemos a planilha bruta
+        df_raw = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
+        
+        # Corte de rodapé mais seguro: só corta se encontrar a linha e se ela não for a primeira
+        mask_corte = df_raw.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)
+        indices_corte = df_raw[mask_corte].index
+        
+        if not indices_corte.empty and indices_corte[0] > 5:
+            df_m = df_raw.iloc[:indices_corte[0]].copy()
+        else:
+            # Se não achar ou for erro, limpa apenas linhas onde as 3 primeiras colunas são nulas
+            df_m = df_raw.dropna(how='all', thresh=2).copy()
+
+        # Garantir que temos colunas suficientes antes de mapear
+        if df_m.shape[1] < 10:
+            st.error(f"A planilha {ultimo_item['file'].name} parece ter menos colunas do que o esperado (mínimo 10). Verifique o formato.")
+            st.stop()
 
         df_m.columns = [str(c).strip().upper() for c in df_m.columns]
         
         # --- NOVO MAPEAMENTO FIXO (GOINFRA) ---
-        # Usamos .columns[i] para garantir que pegamos a coluna física correta
-        c_cod  = df_m.columns[0]   # Coluna A/B (Código)
-        c_serv = df_m.columns[9]   # COLUNA J (Descrição) - Índice 9
+        c_cod  = df_m.columns[0]   # Coluna A/B
+        c_serv = df_m.columns[9]   # COLUNA J (Índice 9)
         
-        # Busca dinâmica para as demais, ou índices fixos se falhar
         c_unid = next((c for c in df_m.columns if 'UNID' in str(c).upper()), df_m.columns[10])
         c_precu = next((c for c in df_m.columns if 'UNIT' in str(c).upper()), df_m.columns[11])
         c_qtd_orc = next((c for c in df_m.columns if 'CONTRATADA' in str(c).upper() or 'QTD. ORC' in str(c).upper()), df_m.columns[12])
@@ -67,10 +77,9 @@ if uploaded_files:
         resultado = df_m[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
         resultado.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
         
-        # Limpeza para evitar que 'nan' vire texto
+        # Limpeza
         resultado['SERVICO'] = resultado['SERVICO'].astype(str).replace(['nan', '0', '0.0', 'None'], '')
         
-        # CHAVE_JOIN baseada na nova coluna SERVICO (Coluna J)
         resultado['CHAVE_JOIN'] = (
             resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
             resultado['SERVICO'].astype(str).str.strip().str.upper()
