@@ -41,90 +41,126 @@ if uploaded_files:
 
     # --- INÍCIO DA SUBSTITUIÇÃO ---
 
-   # 1. ESQUELETO MESTRE (Coluna B=Código, Coluna J=Serviço)
+    # 1. ESQUELETO MESTRE (A "Verdade" vem daqui)
     try:
         ultimo_item = processados[-1]
         eng_m = 'xlrd' if ultimo_item['file'].name.endswith('.xls') else 'openpyxl'
-        # Lemos a partir da linha 26 (skiprows=25)
-        df_raw = pd.read_excel(ultimo_item['file'], skiprows=25, header=None, engine=eng_m)
+        df_m = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
         
-        # Filtro de rodapé: para quando encontrar "TOTAL" na primeira ou segunda coluna
-        linha_corte = df_raw[df_raw.iloc[:, 0].astype(str).str.contains("TOTAL|MÃO-DE-OBRA", case=False, na=False)].index
+        # Corte de rodapé
+        linha_corte = df_m[df_m.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
         if not linha_corte.empty:
-            df_raw = df_raw.iloc[:linha_corte[0]]
+            df_m = df_m.iloc[:linha_corte[0]]
 
-        # Mapeamento Direto por Índices (Padrão GOINFRA)
-        # B=1 (Cód), J=9 (Descrição), K=10 (Unid), L=11 (Preço), M=12 (Qtd Contratada)
-        resultado = pd.DataFrame()
-        resultado['COD'] = df_raw.iloc[:, 1].astype(str).replace('nan', '').str.strip()
-        resultado['SERVICO'] = df_raw.iloc[:, 9].astype(str).replace('nan', '').str.strip()
-        resultado['UNID'] = df_raw.iloc[:, 10].astype(str).replace('nan', '').str.strip()
-        resultado['PRECO_UNIT'] = pd.to_numeric(df_raw.iloc[:, 11], errors='coerce').fillna(0)
-        resultado['QTD_ORC'] = pd.to_numeric(df_raw.iloc[:, 12], errors='coerce').fillna(0)
+        df_m.columns = [str(c).strip().upper() for c in df_m.columns]
         
-        # DNA único para não perder o rastro no aditivo
-        resultado['CHAVE_JOIN'] = resultado['COD'] + "_" + resultado['SERVICO']
+       # --- NOVO MAPEAMENTO FIXO (GOINFRA) ---
+        # Usamos .columns[i] para garantir que pegamos a coluna física correta
+        c_cod  = df_m.columns[0]   # Coluna A/B (Código)
+        c_serv = df_m.columns[9]   # COLUNA J (Descrição) - Índice 9
+        
+        # Busca dinâmica para as demais, ou índices fixos se falhar
+        c_unid = next((c for c in df_m.columns if 'UNID' in str(c).upper()), df_m.columns[10])
+        c_precu = next((c for c in df_m.columns if 'UNIT' in str(c).upper()), df_m.columns[11])
+        c_qtd_orc = next((c for c in df_m.columns if 'CONTRATADA' in str(c).upper() or 'QTD. ORC' in str(c).upper()), df_m.columns[12])
+        
+        resultado = df_m[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
+        resultado.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
+        
+        # Limpeza para evitar que 'nan' vire texto
+        resultado['SERVICO'] = resultado['SERVICO'].astype(str).replace(['nan', '0', '0.0', 'None'], '')
+        
+        # CHAVE_JOIN baseada na nova coluna SERVICO (Coluna J)
+        resultado['CHAVE_JOIN'] = (
+            resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
+            resultado['SERVICO'].astype(str).str.strip().str.upper()
+        )
         resultado['ORDEM_ORIGINAL'] = range(len(resultado))
 
     except Exception as e:
-        st.error(f"Erro ao ler a estrutura da Coluna J: {e}")
+        st.error(f"Erro ao montar esqueleto da última medição: {e}")
         st.stop()
 
-    # 2. INTEGRAÇÃO DAS MEDIÇÕES (Busca apenas os valores)
+    # 2. INTEGRAÇÃO DOS VALORES (Buscamos apenas números nas outras BMs)
     for item in processados:
         try:
             eng = 'xlrd' if item['file'].name.endswith('.xls') else 'openpyxl'
-            df_bm = pd.read_excel(item['file'], skiprows=25, header=None, engine=eng)
+            df_bm = pd.read_excel(item['file'], skiprows=25, engine=eng)
+            df_bm.columns = [str(c).strip().upper() for c in df_bm.columns]
             label = item['label']
             
-            # Mesma chave de busca (B + J)
+            # Criamos a chave na planilha atual para dar o "match"
             df_bm['CHAVE_JOIN'] = (
-                df_bm.iloc[:, 1].astype(str).str.strip() + "_" + 
-                df_bm.iloc[:, 9].astype(str).str.strip()
+                df_bm.iloc[:, 0].astype(str).str.strip().str.upper() + "_" + 
+                df_bm.iloc[:, 1].astype(str).str.strip().str.upper()
             )
             
-            # Dados da Medição: Geralmente Qtd está na Coluna P(15) e Valor na Q(16)
-            # Mas vamos buscar a coluna que tem o valor monetário da medição
+            cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
+            c_reaj = next((c for c in df_bm.columns if 'REAJUSTE' in c or 'REAJUSTAMENTO' in c), None)
+            
+            # ATENÇÃO: Pegamos APENAS a chave e as colunas de valor/qtd
+            # Não pegamos a coluna 'SERVICO' daqui para não sobrescrever a mestre
             med_dados = pd.DataFrame()
             med_dados['CHAVE_JOIN'] = df_bm['CHAVE_JOIN']
             
-            # Procura a coluna de valor da medição (normalmente 2 colunas após a Qtd Contratada)
-            # Na GOINFRA padrão: Coluna P = 15 (Qtd Medida), Coluna Q = 16 (Valor Medido)
-            med_dados[f'QTD_{label}'] = pd.to_numeric(df_bm.iloc[:, 15], errors='coerce').fillna(0)
-            med_dados[f'VALOR_{label}'] = pd.to_numeric(df_bm.iloc[:, 16], errors='coerce').fillna(0)
+            if len(cols_med) >= 2:
+                med_dados[f'QTD_{label}'] = pd.to_numeric(df_bm[cols_med[0]], errors='coerce')
+                med_dados[f'VALOR_{label}'] = pd.to_numeric(df_bm[cols_med[1]], errors='coerce')
             
-            # Remove duplicatas e une ao mestre
+            if c_reaj:
+                med_dados[f'REAJ_{label}'] = pd.to_numeric(df_bm[c_reaj], errors='coerce')
+            
+            # Removemos duplicatas da medição antes de unir
             med_dados = med_dados.drop_duplicates(subset=['CHAVE_JOIN'])
+            
+            # Unimos apenas os valores ao nosso esqueleto mestre
             resultado = pd.merge(resultado, med_dados, on='CHAVE_JOIN', how='left')
-        except:
-            st.warning(f"Não foi possível processar a {label}")
+            
+        except Exception as e:
+            st.warning(f"Aviso em {item['label']}: {e}")
 
-    # 3. CONSOLIDAÇÃO FINAL
-    resultado = resultado.sort_values('ORDEM_ORIGINAL').fillna(0)
+    # 3. CONSOLIDAÇÃO E LIMPEZA (A prova de falhas)
     
-    # Cálculos de Acumulado
+    # Mantém a ordem da última planilha
+    resultado = resultado.sort_values('ORDEM_ORIGINAL')
+
+    # Identifica o que é número e o que é texto
+    cols_numericas = resultado.select_dtypes(include=['number']).columns
+    # Zera apenas onde deve haver números
+    resultado[cols_numericas] = resultado[cols_numericas].fillna(0)
+    # Garante que textos fiquem como string (evita o erro de sumir ou virar 0,00)
+    resultado = resultado.fillna("")
+
+    # Cálculos Finais
+    c_qtds = [c for c in resultado.columns if 'QTD_BM' in c]
     c_vals = [c for c in resultado.columns if 'VALOR_BM' in c]
-    resultado['TOTAL_GERAL'] = resultado[c_vals].sum(axis=1)
+    c_reajs = [c for c in resultado.columns if 'REAJ_BM' in c]
 
-    # Limpeza de colunas técnicas
-    df_view = resultado.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL'])
+    resultado['QTD_ACUMULADA'] = resultado[c_qtds].sum(axis=1)
+    resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
+    resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
+    resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
 
-    # --- EXIBIÇÃO ---
+    # Criamos o dataframe final de exibição removendo as colunas de controle
+    df_exibicao = resultado.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL'])
+
+    # --- TELA: HISTÓRICO ---
     st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
+    
+    # Formatação condicional para os números
+    format_dict = {col: formatar_br for col in df_exibicao.select_dtypes(include=['number']).columns}
 
-    # Formatação de Moeda apenas para colunas numéricas (ignora a Coluna J/Serviço)
-    cols_float = df_view.select_dtypes(include=['float64', 'int64']).columns
-    format_rules = {c: formatar_br for c in cols_float}
-
-    # FUNÇÃO DE ESTILO CORRIGIDA (O erro do traceback estava aqui)
-    def style_row(row):
-        # Se o preço unitário for zero, é um Título/Cabeçalho
-        if row['PRECO_UNIT'] == 0:
-            return ['background-color: #f0f2f6; color: #1f77b4; font-weight: bold'] * len(row)
+    def destacar_titulos(row):
+        try:
+            # Se for título (Preço Unitário zero ou vazio), destaca em azul
+            p_unit = float(row['PRECO_UNIT']) if row['PRECO_UNIT'] != "" else 0
+            if p_unit == 0:
+                return ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(row)
+        except: pass
         return [''] * len(row)
 
     st.dataframe(
-        df_view.style.apply(style_row, axis=1).format(format_rules),
+        df_exibicao.style.apply(destacar_titulos, axis=1).format(format_dict),
         use_container_width=True
     )
 
