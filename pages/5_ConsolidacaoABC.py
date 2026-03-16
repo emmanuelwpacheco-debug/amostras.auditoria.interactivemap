@@ -41,120 +41,94 @@ if uploaded_files:
 
     # --- INÍCIO DA SUBSTITUIÇÃO ---
 
-    # 1. ESQUELETO MESTRE (A "Verdade" vem daqui)
+   # 1. ESQUELETO MESTRE (Ajustado para o padrão de colunas da GOINFRA)
     try:
         ultimo_item = processados[-1]
         eng_m = 'xlrd' if ultimo_item['file'].name.endswith('.xls') else 'openpyxl'
+        # Lemos sem pular linhas primeiro para encontrar a estrutura real
         df_m = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
         
-        # Corte de rodapé
+        # Corte de rodapé (Geralmente onde terminam os serviços)
         linha_corte = df_m[df_m.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
         if not linha_corte.empty:
             df_m = df_m.iloc[:linha_corte[0]]
 
-        df_m.columns = [str(c).strip().upper() for c in df_m.columns]
+        # --- MAPEAMENTO SEGURO POR ÍNDICE (Padrão GOINFRA com Descrição em J) ---
+        # A=0, B=1 (Cód), ..., J=9 (Descrição), K=10 (Unid), L=11 (Preço), M=12 (Qtd Contratada)
+        resultado = pd.DataFrame()
+        resultado['COD'] = df_m.iloc[:, 1].astype(str).replace('nan', '')
+        resultado['SERVICO'] = df_m.iloc[:, 9].astype(str).replace('nan', '') # COLUNA J
+        resultado['UNID'] = df_m.iloc[:, 10].astype(str).replace('nan', '')
+        resultado['PRECO_UNIT'] = pd.to_numeric(df_m.iloc[:, 11], errors='coerce')
+        resultado['QTD_ORC'] = pd.to_numeric(df_m.iloc[:, 12], errors='coerce')
         
-        c_cod = df_m.columns[0]
-        c_serv = df_m.columns[1]
-        c_unid = next((c for c in df_m.columns if 'UNID' in c), df_m.columns[2])
-        c_precu = next((c for c in df_m.columns if 'UNIT' in c), df_m.columns[3])
-        c_qtd_orc = next((c for c in df_m.columns if 'CONTRATADA' in c or 'QTD. ORC' in c), df_m.columns[4])
-        
-        # Criamos o dataframe base com as descrições oficiais
-        resultado = df_m[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
-        resultado.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
-        
-        # Geramos a CHAVE_JOIN para o casamento de dados
-        resultado['CHAVE_JOIN'] = (
-            resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
-            resultado['SERVICO'].astype(str).str.strip().str.upper()
-        )
+        # Criamos o DNA da linha para o match
+        resultado['CHAVE_JOIN'] = resultado['COD'].str.strip() + "_" + resultado['SERVICO'].str.strip()
         resultado['ORDEM_ORIGINAL'] = range(len(resultado))
 
     except Exception as e:
-        st.error(f"Erro ao montar esqueleto da última medição: {e}")
+        st.error(f"Erro ao mapear a Coluna J: {e}. Verifique se a planilha segue o padrão esperado.")
         st.stop()
 
-    # 2. INTEGRAÇÃO DOS VALORES (Buscamos apenas números nas outras BMs)
+    # 2. INTEGRAÇÃO DOS VALORES
     for item in processados:
         try:
             eng = 'xlrd' if item['file'].name.endswith('.xls') else 'openpyxl'
             df_bm = pd.read_excel(item['file'], skiprows=25, engine=eng)
-            df_bm.columns = [str(c).strip().upper() for c in df_bm.columns]
             label = item['label']
             
-            # Criamos a chave na planilha atual para dar o "match"
+            # Criamos a chave na planilha atual usando os mesmos índices 1 e 9
             df_bm['CHAVE_JOIN'] = (
-                df_bm.iloc[:, 0].astype(str).str.strip().str.upper() + "_" + 
-                df_bm.iloc[:, 1].astype(str).str.strip().str.upper()
+                df_bm.iloc[:, 1].astype(str).str.strip() + "_" + 
+                df_bm.iloc[:, 9].astype(str).str.strip()
             )
             
-            cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
-            c_reaj = next((c for c in df_bm.columns if 'REAJUSTE' in c or 'REAJUSTAMENTO' in c), None)
+            # Localizamos as colunas de "DA MEDIÇÃO" (Geralmente ficam lá pela coluna P ou Q)
+            # Vamos procurar dinamicamente para não errar o índice
+            cols_nomes = [str(c).upper() for c in df_bm.columns]
+            idx_medicao = -1
+            for i, nome in enumerate(cols_nomes):
+                if 'MEDIÇÃO' in nome:
+                    idx_medicao = i
+                    break
             
-            # ATENÇÃO: Pegamos APENAS a chave e as colunas de valor/qtd
-            # Não pegamos a coluna 'SERVICO' daqui para não sobrescrever a mestre
             med_dados = pd.DataFrame()
             med_dados['CHAVE_JOIN'] = df_bm['CHAVE_JOIN']
             
-            if len(cols_med) >= 2:
-                med_dados[f'QTD_{label}'] = pd.to_numeric(df_bm[cols_med[0]], errors='coerce')
-                med_dados[f'VALOR_{label}'] = pd.to_numeric(df_bm[cols_med[1]], errors='coerce')
+            if idx_medicao != -1:
+                med_dados[f'QTD_{label}'] = pd.to_numeric(df_bm.iloc[:, idx_medicao], errors='coerce')
+                med_dados[f'VALOR_{label}'] = pd.to_numeric(df_bm.iloc[:, idx_medicao + 1], errors='coerce')
             
-            if c_reaj:
-                med_dados[f'REAJ_{label}'] = pd.to_numeric(df_bm[c_reaj], errors='coerce')
-            
-            # Removemos duplicatas da medição antes de unir
             med_dados = med_dados.drop_duplicates(subset=['CHAVE_JOIN'])
-            
-            # Unimos apenas os valores ao nosso esqueleto mestre
             resultado = pd.merge(resultado, med_dados, on='CHAVE_JOIN', how='left')
             
-        except Exception as e:
-            st.warning(f"Aviso em {item['label']}: {e}")
+        except: pass
 
-    # 3. CONSOLIDAÇÃO E LIMPEZA (A prova de falhas)
-    
-    # Mantém a ordem da última planilha
+    # 3. CONSOLIDAÇÃO (Ajuste Crítico para Texto vs Número)
     resultado = resultado.sort_values('ORDEM_ORIGINAL')
 
-    # Identifica o que é número e o que é texto
-    cols_numericas = resultado.select_dtypes(include=['number']).columns
-    # Zera apenas onde deve haver números
-    resultado[cols_numericas] = resultado[cols_numericas].fillna(0)
-    # Garante que textos fiquem como string (evita o erro de sumir ou virar 0,00)
-    resultado = resultado.fillna("")
-
-    # Cálculos Finais
-    c_qtds = [c for c in resultado.columns if 'QTD_BM' in c]
-    c_vals = [c for c in resultado.columns if 'VALOR_BM' in c]
-    c_reajs = [c for c in resultado.columns if 'REAJ_BM' in c]
-
-    resultado['QTD_ACUMULADA'] = resultado[c_qtds].sum(axis=1)
-    resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
-    resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
-    resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
-
-    # Criamos o dataframe final de exibição removendo as colunas de controle
-    df_exibicao = resultado.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL'])
-
-    # --- TELA: HISTÓRICO ---
-    st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
+    # Identificamos colunas numéricas (Quantidades e Valores)
+    cols_num = resultado.select_dtypes(include=['number']).columns
+    resultado[cols_num] = resultado[cols_num].fillna(0)
     
-    # Formatação condicional para os números
-    format_dict = {col: formatar_br for col in df_exibicao.select_dtypes(include=['number']).columns}
+    # Protegemos as colunas de texto (COD, SERVICO, UNID)
+    for col in ['COD', 'SERVICO', 'UNID']:
+        resultado[col] = resultado[col].astype(str).replace(['nan', '0', '0.0'], '')
 
-    def destacar_titulos(row):
-        try:
-            # Se for título (Preço Unitário zero ou vazio), destaca em azul
-            p_unit = float(row['PRECO_UNIT']) if row['PRECO_UNIT'] != "" else 0
-            if p_unit == 0:
-                return ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(row)
-        except: pass
-        return [''] * len(row)
+    # Somas Acumuladas
+    c_vals = [c for c in resultado.columns if 'VALOR_BM' in c]
+    resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
+    resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO']
+
+    df_view = resultado.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL'])
+
+    # --- EXIBIÇÃO ---
+    # Só formatamos como moeda o que é REALMENTE número (pula a coluna Serviço)
+    format_rules = {c: formatar_br for c in df_view.select_dtypes(include=['number']).columns}
 
     st.dataframe(
-        df_exibicao.style.apply(destacar_titulos, axis=1).format(format_dict),
+        df_view.style.apply(lambda r: ['background-color: #f0f2f6'] if str(r['PRECO_UNIT']) == '0.0' else ['']*len(r), axis=1)
+        .format(format_rules),
         use_container_width=True
     )
 
