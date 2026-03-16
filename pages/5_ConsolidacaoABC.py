@@ -54,17 +54,23 @@ if uploaded_files:
 
         df_m.columns = [str(c).strip().upper() for c in df_m.columns]
         
-        c_cod = df_m.columns[0]
-        c_serv = df_m.columns[1]
-        c_unid = next((c for c in df_m.columns if 'UNID' in c), df_m.columns[2])
-        c_precu = next((c for c in df_m.columns if 'UNIT' in c), df_m.columns[3])
-        c_qtd_orc = next((c for c in df_m.columns if 'CONTRATADA' in c or 'QTD. ORC' in c), df_m.columns[4])
+        # --- NOVO MAPEAMENTO FIXO (GOINFRA) ---
+        # Usamos .columns[i] para garantir que pegamos a coluna física correta
+        c_cod  = df_m.columns[0]   # Coluna A/B (Código)
+        c_serv = df_m.columns[9]   # COLUNA J (Descrição) - Índice 9
         
-        # Criamos o dataframe base com as descrições oficiais
+        # Busca dinâmica para as demais, ou índices fixos se falhar
+        c_unid = next((c for c in df_m.columns if 'UNID' in str(c).upper()), df_m.columns[10])
+        c_precu = next((c for c in df_m.columns if 'UNIT' in str(c).upper()), df_m.columns[11])
+        c_qtd_orc = next((c for c in df_m.columns if 'CONTRATADA' in str(c).upper() or 'QTD. ORC' in str(c).upper()), df_m.columns[12])
+        
         resultado = df_m[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
         resultado.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
         
-        # Geramos a CHAVE_JOIN para o casamento de dados
+        # Limpeza para evitar que 'nan' vire texto
+        resultado['SERVICO'] = resultado['SERVICO'].astype(str).replace(['nan', '0', '0.0', 'None'], '')
+        
+        # CHAVE_JOIN baseada na nova coluna SERVICO (Coluna J)
         resultado['CHAVE_JOIN'] = (
             resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
             resultado['SERVICO'].astype(str).str.strip().str.upper()
@@ -83,10 +89,10 @@ if uploaded_files:
             df_bm.columns = [str(c).strip().upper() for c in df_bm.columns]
             label = item['label']
             
-            # Criamos a chave na planilha atual para dar o "match"
+         # Criamos a chave usando o índice 0 e o índice 9 (Coluna J)
             df_bm['CHAVE_JOIN'] = (
                 df_bm.iloc[:, 0].astype(str).str.strip().str.upper() + "_" + 
-                df_bm.iloc[:, 1].astype(str).str.strip().str.upper()
+                df_bm.iloc[:, 9].astype(str).str.strip().str.upper()
             )
             
             cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
@@ -116,7 +122,14 @@ if uploaded_files:
     # 3. CONSOLIDAÇÃO E LIMPEZA (A prova de falhas)
     
     # Mantém a ordem da última planilha
-    resultado = resultado.sort_values('ORDEM_ORIGINAL')
+
+    # 1. Identifica colunas de texto e limpa valores fantasmas
+    for col in ['COD', 'SERVICO', 'UNID']:
+        resultado[col] = resultado[col].astype(str).replace(['nan', '0', '0.0', 'None'], '')
+
+    # 2. Identifica colunas numéricas e zera os valores nulos
+    cols_numericas = resultado.select_dtypes(include=['number']).columns
+    resultado[cols_numericas] = resultado[cols_numericas].fillna(0)
 
     # Identifica o que é número e o que é texto
     cols_numericas = resultado.select_dtypes(include=['number']).columns
