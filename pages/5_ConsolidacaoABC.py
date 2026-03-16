@@ -41,35 +41,25 @@ if uploaded_files:
 
     # --- INÍCIO DA SUBSTITUIÇÃO ---
 
-   # 1. ESQUELETO MESTRE (A "Verdade" vem daqui)
+    # 1. ESQUELETO MESTRE (A "Verdade" vem daqui)
     try:
         ultimo_item = processados[-1]
         eng_m = 'xlrd' if ultimo_item['file'].name.endswith('.xls') else 'openpyxl'
+        df_m = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
         
-        # Lemos a planilha bruta
-        df_raw = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
-        
-        # Corte de rodapé mais seguro: só corta se encontrar a linha e se ela não for a primeira
-        mask_corte = df_raw.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)
-        indices_corte = df_raw[mask_corte].index
-        
-        if not indices_corte.empty and indices_corte[0] > 5:
-            df_m = df_raw.iloc[:indices_corte[0]].copy()
-        else:
-            # Se não achar ou for erro, limpa apenas linhas onde as 3 primeiras colunas são nulas
-            df_m = df_raw.dropna(how='all', thresh=2).copy()
-
-        # Garantir que temos colunas suficientes antes de mapear
-        if df_m.shape[1] < 10:
-            st.error(f"A planilha {ultimo_item['file'].name} parece ter menos colunas do que o esperado (mínimo 10). Verifique o formato.")
-            st.stop()
+        # Corte de rodapé
+        linha_corte = df_m[df_m.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
+        if not linha_corte.empty:
+            df_m = df_m.iloc[:linha_corte[0]]
 
         df_m.columns = [str(c).strip().upper() for c in df_m.columns]
         
         # --- NOVO MAPEAMENTO FIXO (GOINFRA) ---
-        c_cod  = df_m.columns[0]   # Coluna A/B
-        c_serv = df_m.columns[9]   # COLUNA J (Índice 9)
+        # Usamos .columns[i] para garantir que pegamos a coluna física correta
+        c_cod  = df_m.columns[0]   # Coluna A/B (Código)
+        c_serv = df_m.columns[9]   # COLUNA J (Descrição) - Índice 9
         
+        # Busca dinâmica para as demais, ou índices fixos se falhar
         c_unid = next((c for c in df_m.columns if 'UNID' in str(c).upper()), df_m.columns[10])
         c_precu = next((c for c in df_m.columns if 'UNIT' in str(c).upper()), df_m.columns[11])
         c_qtd_orc = next((c for c in df_m.columns if 'CONTRATADA' in str(c).upper() or 'QTD. ORC' in str(c).upper()), df_m.columns[12])
@@ -77,9 +67,10 @@ if uploaded_files:
         resultado = df_m[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
         resultado.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
         
-        # Limpeza
+        # Limpeza para evitar que 'nan' vire texto
         resultado['SERVICO'] = resultado['SERVICO'].astype(str).replace(['nan', '0', '0.0', 'None'], '')
         
+        # CHAVE_JOIN baseada na nova coluna SERVICO (Coluna J)
         resultado['CHAVE_JOIN'] = (
             resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
             resultado['SERVICO'].astype(str).str.strip().str.upper()
@@ -128,8 +119,10 @@ if uploaded_files:
         except Exception as e:
             st.warning(f"Aviso em {item['label']}: {e}")
 
-   # 3. CONSOLIDAÇÃO E LIMPEZA
+    # 3. CONSOLIDAÇÃO E LIMPEZA (A prova de falhas)
     
+    # Mantém a ordem da última planilha
+
     # 1. Identifica colunas de texto e limpa valores fantasmas
     for col in ['COD', 'SERVICO', 'UNID']:
         resultado[col] = resultado[col].astype(str).replace(['nan', '0', '0.0', 'None'], '')
@@ -138,7 +131,14 @@ if uploaded_files:
     cols_numericas = resultado.select_dtypes(include=['number']).columns
     resultado[cols_numericas] = resultado[cols_numericas].fillna(0)
 
-    # Cálculos Finais de Acumulados
+    # Identifica o que é número e o que é texto
+    cols_numericas = resultado.select_dtypes(include=['number']).columns
+    # Zera apenas onde deve haver números
+    resultado[cols_numericas] = resultado[cols_numericas].fillna(0)
+    # Garante que textos fiquem como string (evita o erro de sumir ou virar 0,00)
+    resultado = resultado.fillna("")
+
+    # Cálculos Finais
     c_qtds = [c for c in resultado.columns if 'QTD_BM' in c]
     c_vals = [c for c in resultado.columns if 'VALOR_BM' in c]
     c_reajs = [c for c in resultado.columns if 'REAJ_BM' in c]
@@ -148,96 +148,8 @@ if uploaded_files:
     resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
     resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
 
-    # --- CÁLCULO DE TOTAIS AUTOMÁTICOS ---
-    # Filtramos apenas o que é serviço real (coluna UNID preenchida)
-    df_servicos = resultado[resultado['UNID'].astype(str).str.strip() != ""].copy()
-
-    soma_pi_total = df_servicos['VALOR_ACUMULADO'].sum()
-    soma_reaj_total = df_servicos['REAJUSTE_ACUMULADO'].sum()
-    soma_global_total = soma_pi_total + soma_reaj_total
-
-    # Criamos a linha de resumo
-    linha_total_obra = pd.Series(dtype='object')
-    linha_total_obra['SERVICO'] = ">>> TOTAL GERAL DA OBRA (SOMA DOS SERVIÇOS)"
-    linha_total_obra['VALOR_ACUMULADO'] = soma_pi_total
-    linha_total_obra['REAJUSTE_ACUMULADO'] = soma_reaj_total
-    linha_total_obra['TOTAL_GERAL'] = soma_global_total
-
-    # Criamos o dataframe final de exibição incluindo a nova linha
-    df_exibicao = pd.concat([resultado, linha_total_obra.to_frame().T], ignore_index=True)
-    df_exibicao = df_exibicao.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL']).fillna(0)
-
-    # --- TELA: HISTÓRICO ---
-    st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
-    
-    format_dict = {col: formatar_br for col in df_exibicao.select_dtypes(include=['number']).columns}
-
-    def destacar_titulos(row):
-        try:
-            if "TOTAL GERAL DA OBRA" in str(row['SERVICO']):
-                return ['background-color: #1f77b4; color: white; font-weight: bold'] * len(row)
-            p_unit = float(row['PRECO_UNIT']) if row['PRECO_UNIT'] != "" else 0
-            if p_unit == 0:
-                return ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(row)
-        except: pass
-        return [''] * len(row)
-
-    st.dataframe(
-        df_exibicao.style.apply(destacar_titulos, axis=1).format(format_dict),
-        use_container_width=True
-    )
-
-    # --- ABA: CURVA ABC ---
-    st.divider()
-    st.subheader("📈 Análise de Curva ABC (Somente Serviços)")
-    
-    # Usamos o df_servicos que já filtramos para a somatória correta
-    abc = df_servicos[df_servicos['TOTAL_GERAL'] > 0.01].copy()
-    
-    if not abc.empty:
-        abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
-        
-        abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / soma_global_total) * 100
-        abc['%_ACUMULADO'] = abc['%_SIMPLES'].cumsum()
-        
-        def classificar_abc(porc):
-            if porc <= 80.01: return 'A'
-            if porc <= 95.01: return 'B'
-            return 'C'
-        
-        abc['CLASSE'] = abc['%_ACUMULADO'].apply(classificar_abc)
-
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Serviços (PI)", f"R$ {formatar_br(soma_pi_total)}")
-        m2.metric("Total Reajuste", f"R$ {formatar_br(soma_reaj_total)}")
-        m3.metric("Total Global (PI + Reaj)", f"R$ {formatar_br(soma_global_total)}")
-        m4.metric("Itens Classe A", f"{len(abc[abc['CLASSE'] == 'A'])}")
-
-        def color_classe(val):
-            color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
-            return f'color: {color}; font-weight: bold'
-
-        st.dataframe(
-            abc[['COD', 'SERVICO', 'UNID', 'VALOR_ACUMULADO', 'REAJUSTE_ACUMULADO', 'TOTAL_GERAL', '%_ACUMULADO', 'CLASSE']]
-            .style.format({
-                'VALOR_ACUMULADO': formatar_br,
-                'REAJUSTE_ACUMULADO': formatar_br,
-                'TOTAL_GERAL': formatar_br,
-                '%_ACUMULADO': "{:.2f}%"
-            })
-            .applymap(color_classe, subset=['CLASSE']),
-            use_container_width=True
-        )
-
-    # Exportação Final
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_exibicao.to_excel(writer, sheet_name='Historico_Limpo', index=False)
-        if not abc.empty:
-            abc.to_excel(writer, sheet_name='Curva_ABC', index=False)
-    
-    st.sidebar.divider()
-    st.sidebar.download_button("📥 Baixar Relatório Final (Excel)", output.getvalue(), "relatorio_goinfra_limpo.xlsx")
+    # Criamos o dataframe final de exibição removendo as colunas de controle
+    df_exibicao = resultado.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL'])
 
     # --- TELA: HISTÓRICO ---
     st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
