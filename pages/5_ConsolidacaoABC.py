@@ -119,10 +119,8 @@ if uploaded_files:
         except Exception as e:
             st.warning(f"Aviso em {item['label']}: {e}")
 
-    # 3. CONSOLIDAÇÃO E LIMPEZA (A prova de falhas)
+   # 3. CONSOLIDAÇÃO E LIMPEZA
     
-    # Mantém a ordem da última planilha
-
     # 1. Identifica colunas de texto e limpa valores fantasmas
     for col in ['COD', 'SERVICO', 'UNID']:
         resultado[col] = resultado[col].astype(str).replace(['nan', '0', '0.0', 'None'], '')
@@ -131,14 +129,7 @@ if uploaded_files:
     cols_numericas = resultado.select_dtypes(include=['number']).columns
     resultado[cols_numericas] = resultado[cols_numericas].fillna(0)
 
-    # Identifica o que é número e o que é texto
-    cols_numericas = resultado.select_dtypes(include=['number']).columns
-    # Zera apenas onde deve haver números
-    resultado[cols_numericas] = resultado[cols_numericas].fillna(0)
-    # Garante que textos fiquem como string (evita o erro de sumir ou virar 0,00)
-    resultado = resultado.fillna("")
-
-    # Cálculos Finais
+    # Cálculos Finais de Acumulados
     c_qtds = [c for c in resultado.columns if 'QTD_BM' in c]
     c_vals = [c for c in resultado.columns if 'VALOR_BM' in c]
     c_reajs = [c for c in resultado.columns if 'REAJ_BM' in c]
@@ -147,37 +138,97 @@ if uploaded_files:
     resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
     resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
     resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
+
+    # --- CÁLCULO DE TOTAIS AUTOMÁTICOS ---
+    # Filtramos apenas o que é serviço real (coluna UNID preenchida)
+    df_servicos = resultado[resultado['UNID'].astype(str).str.strip() != ""].copy()
+
+    soma_pi_total = df_servicos['VALOR_ACUMULADO'].sum()
+    soma_reaj_total = df_servicos['REAJUSTE_ACUMULADO'].sum()
+    soma_global_total = soma_pi_total + soma_reaj_total
+
+    # Criamos a linha de resumo
+    linha_total_obra = pd.Series(dtype='object')
+    linha_total_obra['SERVICO'] = ">>> TOTAL GERAL DA OBRA (SOMA DOS SERVIÇOS)"
+    linha_total_obra['VALOR_ACUMULADO'] = soma_pi_total
+    linha_total_obra['REAJUSTE_ACUMULADO'] = soma_reaj_total
+    linha_total_obra['TOTAL_GERAL'] = soma_global_total
+
+    # Criamos o dataframe final de exibição incluindo a nova linha
+    df_exibicao = pd.concat([resultado, linha_total_obra.to_frame().T], ignore_index=True)
+    df_exibicao = df_exibicao.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL']).fillna(0)
+
+    # --- TELA: HISTÓRICO ---
+    st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
     
-        # ... (seu código anterior calculando QTD_ACUMULADA, VALOR_ACUMULADO, etc)
-        #resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
+    format_dict = {col: formatar_br for col in df_exibicao.select_dtypes(include=['number']).columns}
+
+    def destacar_titulos(row):
+        try:
+            if "TOTAL GERAL DA OBRA" in str(row['SERVICO']):
+                return ['background-color: #1f77b4; color: white; font-weight: bold'] * len(row)
+            p_unit = float(row['PRECO_UNIT']) if row['PRECO_UNIT'] != "" else 0
+            if p_unit == 0:
+                return ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(row)
+        except: pass
+        return [''] * len(row)
+
+    st.dataframe(
+        df_exibicao.style.apply(destacar_titulos, axis=1).format(format_dict),
+        use_container_width=True
+    )
+
+    # --- ABA: CURVA ABC ---
+    st.divider()
+    st.subheader("📈 Análise de Curva ABC (Somente Serviços)")
     
-        # --- ACRESCENTE AQUI (INÍCIO) ---
-        # 1. Filtramos apenas o que é serviço real (coluna UNID preenchida)
-        # Isso evita somar linhas de títulos ou totais vazios do Excel
-        df_servicos = resultado[resultado['UNID'].astype(str).str.strip() != ""].copy()
+    # Usamos o df_servicos que já filtramos para a somatória correta
+    abc = df_servicos[df_servicos['TOTAL_GERAL'] > 0.01].copy()
     
-        # 2. Calculamos as somas globais baseadas nos serviços
-        soma_pi_total = df_servicos['VALOR_ACUMULADO'].sum()
-        soma_reaj_total = df_servicos['REAJUSTE_ACUMULADO'].sum()
-        soma_global_total = soma_pi_total + soma_reaj_total
-    
-        # 3. Criamos a linha de resumo para ser exibida no final da tabela
-        linha_total_obra = pd.Series(dtype='object')
-        linha_total_obra['SERVICO'] = ">>> TOTAL GERAL DA OBRA (SOMA DOS SERVIÇOS)"
-        linha_total_obra['VALOR_ACUMULADO'] = soma_pi_total
-        linha_total_obra['REAJUSTE_ACUMULADO'] = soma_reaj_total
-        linha_total_obra['TOTAL_GERAL'] = soma_global_total
-        # --- ACRESCENTE AQUI (FIM) ---
-    
-        # Criamos o dataframe final de exibição removendo as colunas de controle
-        # ALTERAÇÃO AQUI: Use pd.concat para incluir a nova linha
-        df_exibicao = pd.concat([resultado, linha_total_obra.to_frame().T], ignore_index=True)
-        df_exibicao = df_exibicao.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL']).fillna(0)
+    if not abc.empty:
+        abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
         
-        # ... (segue o restante do seu código de exibição da TELA: HISTÓRICO) 
+        abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / soma_global_total) * 100
+        abc['%_ACUMULADO'] = abc['%_SIMPLES'].cumsum()
+        
+        def classificar_abc(porc):
+            if porc <= 80.01: return 'A'
+            if porc <= 95.01: return 'B'
+            return 'C'
+        
+        abc['CLASSE'] = abc['%_ACUMULADO'].apply(classificar_abc)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Serviços (PI)", f"R$ {formatar_br(soma_pi_total)}")
+        m2.metric("Total Reajuste", f"R$ {formatar_br(soma_reaj_total)}")
+        m3.metric("Total Global (PI + Reaj)", f"R$ {formatar_br(soma_global_total)}")
+        m4.metric("Itens Classe A", f"{len(abc[abc['CLASSE'] == 'A'])}")
+
+        def color_classe(val):
+            color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
+            return f'color: {color}; font-weight: bold'
+
+        st.dataframe(
+            abc[['COD', 'SERVICO', 'UNID', 'VALOR_ACUMULADO', 'REAJUSTE_ACUMULADO', 'TOTAL_GERAL', '%_ACUMULADO', 'CLASSE']]
+            .style.format({
+                'VALOR_ACUMULADO': formatar_br,
+                'REAJUSTE_ACUMULADO': formatar_br,
+                'TOTAL_GERAL': formatar_br,
+                '%_ACUMULADO': "{:.2f}%"
+            })
+            .applymap(color_classe, subset=['CLASSE']),
+            use_container_width=True
+        )
+
+    # Exportação Final
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_exibicao.to_excel(writer, sheet_name='Historico_Limpo', index=False)
+        if not abc.empty:
+            abc.to_excel(writer, sheet_name='Curva_ABC', index=False)
     
-    # Criamos o dataframe final de exibição removendo as colunas de controle
-    df_exibicao = resultado.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL'])
+    st.sidebar.divider()
+    st.sidebar.download_button("📥 Baixar Relatório Final (Excel)", output.getvalue(), "relatorio_goinfra_limpo.xlsx")
 
     # --- TELA: HISTÓRICO ---
     st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
