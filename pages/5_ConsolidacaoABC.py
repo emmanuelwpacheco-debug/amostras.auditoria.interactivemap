@@ -39,19 +39,22 @@ if uploaded_files:
     
     processados = sorted(processados, key=lambda x: x['ordem'])
 
-    # 1. Esqueleto Base
+    # --- INÍCIO DA SUBSTITUIÇÃO ---
+
+    # 1. Esqueleto Base (Usando a última planilha como a 'verdade' atual)
     try:
         ultimo_item = processados[-1]
         eng_m = 'xlrd' if ultimo_item['file'].name.endswith('.xls') else 'openpyxl'
         df_m = pd.read_excel(ultimo_item['file'], skiprows=25, engine=eng_m)
         
+        # Corte dinâmico para ignorar o rodapé
         linha_corte = df_m[df_m.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
         if not linha_corte.empty:
             df_m = df_m.iloc[:linha_corte[0]]
 
         df_m.columns = [str(c).strip().upper() for c in df_m.columns]
-        df_m = df_m.loc[:, ~df_m.columns.str.contains('UNNAMED|NAN', case=False)]
         
+        # Identificação das colunas principais
         c_cod = df_m.columns[0]
         c_serv = df_m.columns[1]
         c_unid = next((c for c in df_m.columns if 'UNID' in c), df_m.columns[2])
@@ -60,12 +63,20 @@ if uploaded_files:
         
         resultado = df_m[[c_cod, c_serv, c_unid, c_precu, c_qtd_orc]].copy()
         resultado.columns = ['COD', 'SERVICO', 'UNID', 'PRECO_UNIT', 'QTD_ORC']
-        resultado['ID_LINHA'] = resultado.index
+        
+        # CRIANDO O "DNA" DO SERVIÇO: Combinação de Código e Nome para não errar a linha
+        resultado['CHAVE_JOIN'] = (
+            resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
+            resultado['SERVICO'].astype(str).str.strip().str.upper()
+        )
+        # Salva a ordem para garantir que o aditivo não bagunce a visualização
+        resultado['ORDEM_ORIGINAL'] = range(len(resultado))
+
     except Exception as e:
         st.error(f"Erro na estrutura mestre: {e}")
         st.stop()
 
-    # 2. Integração de Dados
+    # 2. Integração de Dados (Matching por DNA do serviço)
     for item in processados:
         try:
             eng = 'xlrd' if item['file'].name.endswith('.xls') else 'openpyxl'
@@ -73,30 +84,49 @@ if uploaded_files:
             df_bm.columns = [str(c).strip().upper() for c in df_bm.columns]
             label = item['label']
             
+            # Cria a mesma chave na planilha que está sendo lida agora
+            df_bm['CHAVE_JOIN'] = (
+                df_bm.iloc[:, 0].astype(str).str.strip().str.upper() + "_" + 
+                df_bm.iloc[:, 1].astype(str).str.strip().str.upper()
+            )
+            
             cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
             c_reaj = next((c for c in df_bm.columns if 'REAJUSTE' in c or 'REAJUSTAMENTO' in c), None)
             
-            med_cols = pd.DataFrame(index=df_bm.index)
-            if len(cols_med) >= 2:
-                med_cols[f'QTD_{label}'] = pd.to_numeric(df_bm[cols_med[0]], errors='coerce').fillna(0)
-                med_cols[f'VALOR_{label}'] = pd.to_numeric(df_bm[cols_med[1]], errors='coerce').fillna(0)
-            if c_reaj:
-                med_cols[f'REAJ_{label}'] = pd.to_numeric(df_bm[c_reaj], errors='coerce').fillna(0)
+            # Prepara colunas temporárias para o merge
+            med_resumo = pd.DataFrame()
+            med_resumo['CHAVE_JOIN'] = df_bm['CHAVE_JOIN']
             
-            med_cols['ID_LINHA'] = med_cols.index
-            resultado = pd.merge(resultado, med_cols, on='ID_LINHA', how='left')
-        except: pass
+            if len(cols_med) >= 2:
+                med_resumo[f'QTD_{label}'] = pd.to_numeric(df_bm[cols_med[0]], errors='coerce').fillna(0)
+                med_resumo[f'VALOR_{label}'] = pd.to_numeric(df_bm[cols_med[1]], errors='coerce').fillna(0)
+            
+            if c_reaj:
+                med_resumo[f'REAJ_{label}'] = pd.to_numeric(df_bm[c_reaj], errors='coerce').fillna(0)
+            
+            # Evita que subtitulos duplicados criem linhas infinitas
+            med_resumo = med_resumo.drop_duplicates(subset=['CHAVE_JOIN'])
+            
+            # O "CASAMENTO" DOS DADOS: Encontra o serviço pelo nome/código, independente da linha
+            resultado = pd.merge(resultado, med_resumo, on='CHAVE_JOIN', how='left')
+            
+        except Exception as e:
+            st.warning(f"Aviso: Não foi possível alinhar os dados de {item['label']}. Verifique o formato.")
 
     # 3. Consolidação Final
-    resultado = resultado.drop(columns=['ID_LINHA']).fillna(0)
-    c_qtds = [c for c in resultado.columns if 'QTD_' in c]
-    c_vals = [c for c in resultado.columns if 'VALOR_' in c]
-    c_reajs = [c for c in resultado.columns if 'REAJ_' in c]
+    # Reorganiza, remove as chaves de controle e preenche vazios com zero
+    resultado = resultado.sort_values('ORDEM_ORIGINAL').drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL']).fillna(0)
+    
+    c_qtds = [c for c in resultado.columns if 'QTD_BM' in c]
+    c_vals = [c for c in resultado.columns if 'VALOR_BM' in c]
+    c_reajs = [c for c in resultado.columns if 'REAJ_BM' in c]
 
     resultado['QTD_ACUMULADA'] = resultado[c_qtds].sum(axis=1)
     resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
     resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
     resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
+
+    # --- FIM DA SUBSTITUIÇÃO ---
 
     # --- TELA: HISTÓRICO ---
     st.subheader(f"✅ Histórico Consolidado ({len(processados)} Medições)")
