@@ -71,10 +71,9 @@ if uploaded_files:
         resultado['SERVICO'] = resultado['SERVICO'].astype(str).replace(['nan', '0', '0.0', 'None'], '')
         
         # CHAVE_JOIN baseada na nova coluna SERVICO (Coluna J)
-        resultado['CHAVE_JOIN'] = (
-            resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
-            resultado['SERVICO'].astype(str).str.strip().str.upper()
-        )
+       resultado['ORDEM_ORIGINAL'] = range(len(resultado))
+        resultado['CHAVE_JOIN'] = resultado['ORDEM_ORIGINAL'].astype(str) + "_" + \
+                                  resultado['COD'].astype(str).str.strip()
         resultado['ORDEM_ORIGINAL'] = range(len(resultado))
 
     except Exception as e:
