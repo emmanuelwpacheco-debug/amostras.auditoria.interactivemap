@@ -89,10 +89,10 @@ if uploaded_files:
             df_bm.columns = [str(c).strip().upper() for c in df_bm.columns]
             label = item['label']
             
-            # Criamos a chave na planilha atual para dar o "match"
+          # Criamos a chave usando o índice 0 e o índice 9 (Coluna J)
             df_bm['CHAVE_JOIN'] = (
                 df_bm.iloc[:, 0].astype(str).str.strip().str.upper() + "_" + 
-                df_bm.iloc[:, 1].astype(str).str.strip().str.upper()
+                df_bm.iloc[:, 9].astype(str).str.strip().str.upper()
             )
             
             cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
@@ -129,7 +129,13 @@ if uploaded_files:
     # Zera apenas onde deve haver números
     resultado[cols_numericas] = resultado[cols_numericas].fillna(0)
     # Garante que textos fiquem como string (evita o erro de sumir ou virar 0,00)
-    resultado = resultado.fillna("")
+    # 1. Identifica colunas de texto e limpa valores fantasmas
+    for col in ['COD', 'SERVICO', 'UNID']:
+        resultado[col] = resultado[col].astype(str).replace(['nan', '0', '0.0', 'None'], '')
+
+    # 2. Identifica colunas numéricas e zera os valores nulos
+    cols_numericas = resultado.select_dtypes(include=['number']).columns
+    resultado[cols_numericas] = resultado[cols_numericas].fillna(0)
 
     # Cálculos Finais
     c_qtds = [c for c in resultado.columns if 'QTD_BM' in c]
