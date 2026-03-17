@@ -138,21 +138,68 @@ if uploaded_files:
     )
 
     # --- CURVA ABC ---
+   # --- ABA: CURVA ABC (AJUSTADA PARA PI) ---
     st.divider()
-    st.subheader("📈 Curva ABC (Itens de Serviço)")
-    abc = servicos_reais[servicos_reais['TOTAL_GERAL'] > 0.01].sort_values('TOTAL_GERAL', ascending=False)
+    st.subheader("📈 Análise de Curva ABC (Baseada em Preços Iniciais - PI)")
+
+    # Legenda Explicativa
+    st.info("""
+    **Legenda do Relatório:**
+    * **PI (Preço Inicial):** Valor da medição conforme os preços unitários do contrato original.
+    * **Reajustamento:** Correção monetária aplicada sobre o PI conforme índices oficiais.
+    * **Total Geral:** Soma do PI + Reajustamento.
+    * **Curva ABC:** Calculada exclusivamente sobre o **PI Acumulado** para refletir a relevância física dos serviços.
+    """)
+
+    # Filtro: Apenas serviços reais (com Unidade) e com valor medido > 0
+    abc = servicos_reais[servicos_reais['SOMA_VALOR'] > 0.01].copy()
+
     if not abc.empty:
-        total_abc = abc['TOTAL_GERAL'].sum()
-        abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_abc) * 100
-        abc['%_ACC'] = abc['%_SIMPLES'].cumsum()
-        abc['CLASSE'] = abc['%_ACC'].apply(lambda x: 'A' if x <= 80.01 else ('B' if x <= 95.01 else 'C'))
+        # Ordenação pelo PI (SOMA_VALOR) conforme solicitado
+        abc = abc.sort_values(by='SOMA_VALOR', ascending=False)
         
+        total_pi_abc = abc['SOMA_VALOR'].sum()
+        total_reaj_abc = abc['SOMA_REAJUSTE'].sum()
+        
+        # Cálculos da Curva baseados no PI
+        abc['%_SIMPLES'] = (abc['SOMA_VALOR'] / total_pi_abc) * 100
+        abc['%_ACC'] = abc['%_SIMPLES'].cumsum()
+        
+        # Classificação Progressiva
+        def definir_classe(p):
+            if p <= 80.01: return 'A'
+            if p <= 95.01: return 'B'
+            return 'C'
+        
+        abc['CLASSE'] = abc['%_ACC'].apply(definir_classe)
+
+        # Resumo Financeiro em Colunas
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Acumulado (PI)", f"R$ {formatar_br(total_pi_abc)}")
+        m2.metric("Total Reajustamento", f"R$ {formatar_br(total_reaj_abc)}")
+        m3.metric("Total Global (PI + Reaj)", f"R$ {formatar_br(total_pi_abc + total_reaj_abc)}")
+
+        # Exibição da Tabela ABC
+        # Renomeando colunas para clareza na visualização
+        abc_view = abc[[
+            'COD', 'SERVICO', 'UNID', 'VAL_UNIT', 
+            'SOMA_VALOR', '%_ACC', 'CLASSE'
+        ]].rename(columns={'SOMA_VALOR': 'VALOR ACUMULADO (PI)'})
+
+        def color_classe(val):
+            color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
+            return f'color: {color}; font-weight: bold'
+
         st.dataframe(
-            abc[['COD', 'SERVICO', 'UNID', 'TOTAL_GERAL', '%_ACC', 'CLASSE']]
-            .style.format({'TOTAL_GERAL': formatar_br, '%_ACC': "{:.2f}%"}),
+            abc_view.style.format({
+                'VAL_UNIT': formatar_br,
+                'VALOR ACUMULADO (PI)': formatar_br,
+                '%_ACC': "{:.2f}%"
+            }).applymap(color_classe, subset=['CLASSE']),
             use_container_width=True
         )
-
+    else:
+        st.warning("Não há valores de Preço Inicial (PI) medidos para gerar a Curva ABC.")
     # Exportação
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
