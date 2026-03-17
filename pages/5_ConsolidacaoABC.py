@@ -189,7 +189,25 @@ if uploaded_files:
         m4.metric("Itens Classe B", f"{len(abc[abc['CLASSE'] == 'B'])}")
 
         # 4. EXIBIÇÃO DA TABELA ABC
-        # --- 6. EXPORTAÇÃO FORMATADA (XLSXWRITER) ---
+        def color_classe(val):
+            color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
+            return f'color: {color}; font-weight: bold'
+
+        # Seleção de colunas para a visão ABC
+        abc_view = abc[['COD', 'SERVICO', 'UNID', 'SOMA_VALOR', '%_ACC', 'CLASSE']].copy()
+        abc_view = abc_view.rename(columns={'SOMA_VALOR': 'VALOR ACUMULADO (PI)'})
+
+        st.dataframe(
+            abc_view.style.format({
+                'VALOR ACUMULADO (PI)': formatar_br,
+                '%_ACC': "{:.2f}%"
+            }).applymap(color_classe, subset=['CLASSE']),
+            use_container_width=True
+        )
+    else:
+        st.warning("Não há valores de Preço Inicial (PI) medidos para gerar a Curva ABC.")
+    
+    # --- 6. EXPORTAÇÃO FORMATADA (XLSXWRITER) ---
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -244,3 +262,4 @@ if uploaded_files:
         file_name="relatorio_goinfra_consolidado.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
