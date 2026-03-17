@@ -72,9 +72,8 @@ if uploaded_files:
         
         # CHAVE_JOIN baseada na nova coluna SERVICO (Coluna J)
         resultado['CHAVE_JOIN'] = (
-        resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
-        resultado['SERVICO'].astype(str).str.strip().str.upper() + "_" +
-        resultado['UNID'].astype(str).str.strip().str.upper()
+            resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
+            resultado['SERVICO'].astype(str).str.strip().str.upper()
         )
         resultado['ORDEM_ORIGINAL'] = range(len(resultado))
 
@@ -93,8 +92,7 @@ if uploaded_files:
          # Criamos a chave usando o índice 0 e o índice 9 (Coluna J)
             df_bm['CHAVE_JOIN'] = (
                 df_bm.iloc[:, 0].astype(str).str.strip().str.upper() + "_" + 
-                df_bm.iloc[:, 9].astype(str).str.strip().str.upper() + "_" +
-                df_bm.iloc[:, 10].astype(str).str.strip().str.upper()
+                df_bm.iloc[:, 9].astype(str).str.strip().str.upper()
             )
             
             cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
