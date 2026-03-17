@@ -71,12 +71,13 @@ if uploaded_files:
         resultado['SERVICO'] = resultado['SERVICO'].astype(str).replace(['nan', '0', '0.0', 'None'], '')
         
         # CHAVE_JOIN baseada na nova coluna SERVICO (Coluna J)
-        resultado['CHAVE_JOIN'] = (
-            resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
-            resultado['SERVICO'].astype(str).str.strip().str.upper()
-        )
         resultado['ORDEM_ORIGINAL'] = range(len(resultado))
 
+        resultado['CHAVE_JOIN'] = (
+        resultado['COD'].astype(str).str.strip().str.upper() + "_" +
+        resultado['SERVICO'].astype(str).str.strip().str.upper() + "_" +
+        resultado['ORDEM_ORIGINAL'].astype(str)
+        )
     except Exception as e:
         st.error(f"Erro ao montar esqueleto da última medição: {e}")
         st.stop()
@@ -90,9 +91,12 @@ if uploaded_files:
             label = item['label']
             
          # Criamos a chave usando o índice 0 e o índice 9 (Coluna J)
+           df_bm['ORDEM_ORIGINAL'] = range(len(df_bm))
+
             df_bm['CHAVE_JOIN'] = (
-                df_bm.iloc[:, 0].astype(str).str.strip().str.upper() + "_" + 
-                df_bm.iloc[:, 9].astype(str).str.strip().str.upper()
+            df_bm.iloc[:, 0].astype(str).str.strip().str.upper() + "_" +
+            df_bm.iloc[:, 9].astype(str).str.strip().str.upper() + "_" +
+            df_bm['ORDEM_ORIGINAL'].astype(str)
             )
             
             cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
@@ -111,7 +115,7 @@ if uploaded_files:
                 med_dados[f'REAJ_{label}'] = pd.to_numeric(df_bm[c_reaj], errors='coerce')
             
             # Removemos duplicatas da medição antes de unir
-            med_dados = med_dados.drop_duplicates(subset=['CHAVE_JOIN'])
+            med_dados = med_dados.drop_duplicates(subset=['CHAVE_JOIN'], keep='first')
             
             # Unimos apenas os valores ao nosso esqueleto mestre
             resultado = pd.merge(resultado, med_dados, on='CHAVE_JOIN', how='left')
@@ -147,6 +151,28 @@ if uploaded_files:
     resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
     resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
     resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
+
+    # =========================
+    # CORREÇÃO DAS LINHAS DE TOTAL
+    # =========================
+    
+    # Identifica linhas de total pela coluna COD
+    mask_total_obra = resultado['COD'].str.upper().str.contains('TOTAL OBRA', na=False)
+    mask_total_material = resultado['COD'].str.upper().str.contains('TOTAL MATERIAL', na=False)
+    mask_total_mo = resultado['COD'].str.upper().str.contains('MÃO-DE-OBRA', na=False)
+    
+    # Recalcula TOTAL OBRA
+    if mask_total_obra.any():
+        resultado.loc[mask_total_obra, 'VALOR_ACUMULADO'] = resultado.loc[~mask_total_obra, 'VALOR_ACUMULADO'].sum()
+        resultado.loc[mask_total_obra, 'REAJUSTE_ACUMULADO'] = resultado.loc[~mask_total_obra, 'REAJUSTE_ACUMULADO'].sum()
+        resultado.loc[mask_total_obra, 'TOTAL_GERAL'] = resultado.loc[mask_total_obra, 'VALOR_ACUMULADO'] + resultado.loc[mask_total_obra, 'REAJUSTE_ACUMULADO']
+    
+    # (Opcional) Se quiser separar material e mão-de-obra:
+    if mask_total_material.any():
+        resultado.loc[mask_total_material, 'TOTAL_GERAL'] = resultado.loc[~mask_total_material, 'TOTAL_GERAL'].sum()
+    
+    if mask_total_mo.any():
+        resultado.loc[mask_total_mo, 'TOTAL_GERAL'] = resultado.loc[~mask_total_mo, 'TOTAL_GERAL'].sum()
 
     # Criamos o dataframe final de exibição removendo as colunas de controle
     df_exibicao = resultado.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL'])
@@ -223,7 +249,7 @@ if uploaded_files:
     # Exportação Final
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        resultado.to_excel(writer, sheet_name='Historico_Limpo', index=False)
+        .to_excel(writer, sheet_name='Historico_Limpo', index=False)
         if not abc.empty:
             abc.to_excel(writer, sheet_name='Curva_ABC', index=False)
     
