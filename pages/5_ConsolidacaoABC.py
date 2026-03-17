@@ -208,59 +208,83 @@ if uploaded_files:
     else:
         st.warning("Não há valores de Preço Inicial (PI) medidos para gerar a Curva ABC.")
     
-    # --- 6. EXPORTAÇÃO FORMATADA (XLSXWRITER) ---
+   # --- 6. EXPORTAÇÃO FORMATADA E RESTRUTURADA ---
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # Aba 1: Histórico Consolidado
-        df_exibicao.to_excel(writer, sheet_name='Historico_Consolidado', index=False)
+        # 1. Preparação dos dados para o Histórico (Nomes de Colunas amigáveis)
+        # Vamos renomear as colunas dinamicamente para o padrão solicitado
+        df_hist_export = df_exibicao.copy()
+        novos_nomes = {}
+        for col in df_hist_export.columns:
+            if col.startswith('QTD_BM_'):
+                num = col.split('_')[-1]
+                novos_nomes[col] = f'Quantidade BM {num}'
+            elif col.startswith('VAL_BM_'):
+                num = col.split('_')[-1]
+                novos_nomes[col] = f'Valor BM {num}'
+            elif col.startswith('REAJ_BM_'):
+                num = col.split('_')[-1]
+                novos_nomes[col] = f'Valor Reajuste BM {num}'
         
-        # Aba 2: Curva ABC
+        df_hist_export.rename(columns=novos_nomes, inplace=True)
+        df_hist_export.to_excel(writer, sheet_name='Historico_Consolidado', index=False)
+        
+        # 2. Preparação da Curva ABC
         if not abc.empty:
             abc_export = abc[['COD', 'SERVICO', 'UNID', 'SOMA_VALOR', '%_ACC', 'CLASSE']].copy()
             abc_export.rename(columns={'SOMA_VALOR': 'VALOR ACUMULADO (PI)'}, inplace=True)
             abc_export.to_excel(writer, sheet_name='Curva_ABC', index=False)
 
-        # --- Início da Formatação Estética ---
+        # --- Formatação Estética Avançada ---
         workbook = writer.book
         
         # Definição de formatos
-        fmt_num = workbook.add_format({'num_format': '#,##0.00', 'align': 'center'})
-        fmt_perc = workbook.add_format({'num_format': '0.00"%"', 'align': 'center'})
-        fmt_header = workbook.add_format({
-            'bold': True, 'bg_color': '#002b36', 'font_color': 'white',
-            'border': 1, 'align': 'center', 'valign': 'vcenter'
-        })
-        fmt_uc = workbook.add_format({'bg_color': '#F0F2F6', 'bold': True})
+        fmt_header = workbook.add_format({'bold': True, 'bg_color': '#002b36', 'font_color': 'white', 'border': 1, 'align': 'center'})
+        fmt_num = workbook.add_format({'num_format': '#,##0.00'})
+        fmt_perc = workbook.add_format({'num_format': '0.00"%"'})
+        
+        # Formato para Unidades Construtivas (Negrito e cinza claro)
+        fmt_uc = workbook.add_format({'bold': True, 'bg_color': '#EFEFEF', 'border': 1})
+        
+        # Formato para Classe A (Negrito)
+        fmt_classe_a = workbook.add_format({'bold': True})
 
-        # Aplicando na aba Histórico
-        worksheet1 = writer.sheets['Historico_Consolidado']
-        for col_num, value in enumerate(df_exibicao.columns):
-            worksheet1.write(0, col_num, value, fmt_header)
-            # Ajuste de largura das colunas
-            if value == 'SERVICO':
-                worksheet1.set_column(col_num, col_num, 60)
-            else:
-                worksheet1.set_column(col_num, col_num, 15, fmt_num)
+        # --- Aplicando na aba Histórico ---
+        ws1 = writer.sheets['Historico_Consolidado']
+        for col_num, value in enumerate(df_hist_export.columns):
+            ws1.write(0, col_num, value, fmt_header)
+            # Largura das colunas
+            if value == 'SERVICO': ws1.set_column(col_num, col_num, 60)
+            else: ws1.set_column(col_num, col_num, 18, fmt_num)
 
-        # Aplicando na aba Curva ABC
+        # Aplicando lógica de linhas (UCs em Negrito)
+        for row_num in range(len(df_hist_export)):
+            # Se UNID estiver vazia, é uma Unidade Construtiva
+            unid_val = str(df_hist_export.iloc[row_num]['UNID']).strip()
+            if unid_val == "" or unid_val == "0" or unid_val == "0.0":
+                ws1.set_row(row_num + 1, None, fmt_uc)
+
+        # --- Aplicando na aba Curva ABC ---
         if not abc.empty:
-            worksheet2 = writer.sheets['Curva_ABC']
+            ws2 = writer.sheets['Curva_ABC']
             for col_num, value in enumerate(abc_export.columns):
-                worksheet2.write(0, col_num, value, fmt_header)
-                if value == 'SERVICO':
-                    worksheet2.set_column(col_num, col_num, 60)
-                elif '%_ACC' in value:
-                    worksheet2.set_column(col_num, col_num, 15, fmt_perc)
-                else:
-                    worksheet2.set_column(col_num, col_num, 15, fmt_num)
+                ws2.write(0, col_num, value, fmt_header)
+                if value == 'SERVICO': ws2.set_column(col_num, col_num, 60)
+                elif '%_ACC' in value: ws2.set_column(col_num, col_num, 15, fmt_perc)
+                else: ws2.set_column(col_num, col_num, 18, fmt_num)
+
+            # Lógica para Classe A em Negrito
+            for row_num in range(len(abc_export)):
+                classe_val = abc_export.iloc[row_num]['CLASSE']
+                if classe_val == 'A':
+                    ws2.set_row(row_num + 1, None, fmt_classe_a)
 
     st.sidebar.divider()
-    st.sidebar.success("✅ Relatório gerado com 2 abas!")
+    st.sidebar.success("✅ Excel formatado com sucesso!")
     st.sidebar.download_button(
         label="📥 Baixar Relatório Profissional (Excel)",
         data=output.getvalue(),
-        file_name="relatorio_goinfra_consolidado.xlsx",
+        file_name="relatorio_goinfra_estruturado.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
