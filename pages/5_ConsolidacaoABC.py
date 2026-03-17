@@ -3,163 +3,158 @@ import pandas as pd
 import io
 import re
 
-st.set_page_config(page_title="Módulo 5 - Consolidador GOINFRA", layout="wide")
-st.title("📑 Módulo 5: Histórico de Medições e Curva ABC")
+st.set_page_config(page_title="Consolidador GOINFRA Estruturado", layout="wide")
+st.title("📑 Histórico Estruturado e Curva ABC")
 
 uploaded_files = st.sidebar.file_uploader(
-    "Carregue as planilhas (.xls ou .xlsx)", 
+    "Carregue as medições (.xls ou .xlsx)", 
     type=['xls', 'xlsx'], 
     accept_multiple_files=True
 )
 
-# --- 1. FUNÇÕES DE SUPORTE ---
-
-def extrair_ordem_j12(file):
-    """Lê a célula J12 (Linha 12, Coluna J) para ordenar as medições."""
+def extrair_id_medicao(file):
     try:
         engine = 'xlrd' if file.name.endswith('.xls') else 'openpyxl'
-        # J12 é linha 11, coluna 9 (0-indexed)
         df_ref = pd.read_excel(file, nrows=12, usecols="J", header=None, engine=engine)
         texto = str(df_ref.iloc[11, 0])
         match = re.search(r'(\d+)', texto)
         return int(match.group(1)) if match else 999
-    except:
-        return 999
+    except: return 999
 
 def formatar_br(valor):
     if pd.isna(valor) or valor == 0: return "0,00"
     return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-# --- 2. PROCESSAMENTO PRINCIPAL ---
-
 if uploaded_files:
-    # Ordenação cronológica das planilhas
-    files_sorted = sorted(uploaded_files, key=extrair_ordem_j12)
+    # 1. ORDENAÇÃO
+    processados = sorted(uploaded_files, key=extrair_id_medicao)
     
-    # Este DataFrame será o nosso esqueleto que cresce dinamicamente
-    df_consolidado = pd.DataFrame()
-    
-    # Mapeamento de colunas (Excel para Índice 0-based)
-    # A=0, J=9, AD=29, AI=34, AO=40, AU=46, BI=60, CF=83
-    cols_indices = [0, 9, 29, 34, 40, 46, 60, 83]
-    cols_nomes = ['COD', 'SERVICO', 'UNID', 'VAL_UNIT', 'QTD_CONTRATADA', 'QTD_MED', 'VAL_MED', 'REAJUSTE']
+    # Dicionário Mestre: Chave Única -> Dados do Item
+    # A chave será uma combinação de (Nome da UC + Código + Descrição + Índice de Ocorrência)
+    esqueleto_mestre = []
+    dados_por_item = {} # Armazena {chave: {colunas_fixas}}
+    historico_valores = {} # Armazena {chave: {BM_01: valor, ...}}
 
-    for file in files_sorted:
-        n_bm = extrair_ordem_j12(file)
+    # Mapeamento de Colunas (Índices Reais do Excel - 0-based)
+    # A=0, J=9, AD=29, AI=34, AO=40, AU=46, BI=60, CF=83
+    IDX_COD = 0; IDX_SERV = 9; IDX_UNID = 29; IDX_VUNIT = 34; IDX_QCONTR = 40
+    IDX_QMED = 46; IDX_VMED = 60; IDX_REAJ = 83
+
+    # 2. CONSTRUÇÃO DO ESQUELETO EVOLUTIVO
+    for file in processados:
+        n_bm = extrair_id_medicao(file)
         label = f"BM_{n_bm:02d}"
         engine = 'xlrd' if file.name.endswith('.xls') else 'openpyxl'
         
-        # Lendo a planilha a partir da linha 26 (skiprows=25)
-        df_atual = pd.read_excel(file, skiprows=25, header=None, engine=engine)
-        df_atual = df_atual.iloc[:, cols_indices]
-        df_atual.columns = cols_nomes
-
-        # --- FILTRO DE FIM DE PLANILHA ---
-        # Localiza "TOTAL MÃO-DE-OBRA" na coluna A (índice 0)
-        linha_fim = df_atual[df_atual['COD'].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
-        if not linha_fim.empty:
-            df_atual = df_atual.iloc[:linha_fim[0]]
-
-        # --- IDENTIFICAÇÃO DE UNIDADE CONSTRUTIVA E CHAVE ÚNICA ---
-        # Requisito: UC tem UNID vazia.
-        # Para evitar erro de nomes iguais em UCs diferentes, criamos uma chave hierárquica
-        uc_atual = ""
-        chaves = []
+        df = pd.read_excel(file, skiprows=25, header=None, engine=engine)
         
-        for i, row in df_atual.iterrows():
-            is_uc = pd.isna(row['UNID']) or str(row['UNID']).strip() == ""
-            servico_nome = str(row['SERVICO']).strip()
+        # Corte no "TOTAL MÃO-DE-OBRA"
+        corte = df[df.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
+        if not corte.empty: df = df.iloc[:corte[0]]
+
+        uc_atual = "INÍCIO"
+        contagem_ocorrência = {}
+
+        for _, row in df.iterrows():
+            cod = str(row[IDX_COD]).strip() if not pd.isna(row[IDX_COD]) else ""
+            serv = str(row[IDX_SERV]).strip() if not pd.isna(row[IDX_SERV]) else ""
+            unid = str(row[IDX_UNID]).strip() if not pd.isna(row[IDX_UNID]) else ""
             
-            if is_uc:
-                uc_atual = servico_nome
+            # Identifica Unidade Construtiva (Unid vazia e Serviço presente)
+            if (unid == "" or unid == "nan") and serv != "":
+                uc_atual = serv
             
-            # Chave: Unidade Construtiva + Código + Nome do Serviço
-            # O .cumcount() resolve o problema de itens idênticos na mesma UC
-            chaves.append(f"{uc_atual}_{row['COD']}_{servico_nome}")
+            # Gerar Chave Única para rastreabilidade
+            chave_base = f"{uc_atual}|{cod}|{serv}"
+            contagem_ocorrência[chave_base] = contagem_ocorrência.get(chave_base, 0) + 1
+            chave_final = f"{chave_base}|{contagem_ocorrência[chave_base]}"
 
-        df_atual['CHAVE_UNICA'] = chaves
-        # Adiciona contador para chaves duplicadas (ex: vários itens de pavimentação na mesma UC)
-        df_atual['CHAVE_UNICA'] += "_" + df_atual.groupby('CHAVE_UNICA').cumcount().astype(str)
-
-        # Selecionamos apenas o necessário para o merge
-        # Mantemos COD, SERVICO, UNID, VAL_UNIT, QTD_CONTRATADA apenas do arquivo mais recente
-        medicao_cols = df_atual[['CHAVE_UNICA', 'QTD_MED', 'VAL_MED', 'REAJUSTE']].copy()
-        medicao_cols.columns = ['CHAVE_UNICA', f'QTD_{label}', f'VAL_{label}', f'REAJ_{label}']
-
-        if df_consolidado.empty:
-            # Primeira planilha define o esqueleto inicial
-            df_consolidado = df_atual[['CHAVE_UNICA', 'COD', 'SERVICO', 'UNID', 'VAL_UNIT', 'QTD_CONTRATADA']].copy()
-            df_consolidado = pd.merge(df_consolidado, medicao_cols, on='CHAVE_UNICA', how='left')
-        else:
-            # MERGE EXTERNO (how='outer'): Se houver item novo (Aditivo), ele entra no esqueleto
-            # Se o item sumir, ele fica com NaN (que trataremos como zero)
-            df_consolidado = pd.merge(df_consolidado, medicao_cols, on='CHAVE_UNICA', how='outer')
+            # Se o item é novo (Aditivo), insere no esqueleto mestre
+            if chave_final not in dados_por_item:
+                dados_por_item[chave_final] = {
+                    'COD': cod, 'SERVICO': serv, 'UNID': unid, 
+                    'VAL_UNIT': row[IDX_VUNIT], 'QTD_CONTR': row[IDX_QCONTR]
+                }
+                # Mantém a ordem física: se for novo, adicionamos à lista de sequência
+                esqueleto_mestre.append(chave_final)
             
-            # Se for uma linha nova, as informações básicas (COD, SERVICO...) vêm da planilha atual
-            # Atualizamos as informações mestre para as linhas que eram NaN (novas)
-            for col in ['COD', 'SERVICO', 'UNID', 'VAL_UNIT', 'QTD_CONTRATADA']:
-                df_consolidado[col] = df_consolidado[col].combine_first(df_consolidado['CHAVE_UNICA'].map(df_atual.set_index('CHAVE_UNICA')[col]))
+            # Armazena os valores desta medição específica
+            if chave_final not in historico_valores: historico_valores[chave_final] = {}
+            historico_valores[chave_final][f'QTD_{label}'] = pd.to_numeric(row[IDX_QMED], errors='coerce') or 0
+            historico_valores[chave_final][f'VAL_{label}'] = pd.to_numeric(row[IDX_VMED], errors='coerce') or 0
+            historico_valores[chave_final][f'REAJ_{label}'] = pd.to_numeric(row[IDX_REAJ], errors='coerce') or 0
 
-    # --- 3. CONSOLIDAÇÃO DOS TOTAIS ---
+    # 3. MONTAGEM DO DATAFRAME FINAL
+    linhas_finais = []
+    for chave in esqueleto_mestre:
+        row_data = dados_por_item[chave].copy()
+        # Adiciona os valores de cada BM (se não existir na BM, coloca 0)
+        for file in processados:
+            n = extrair_id_medicao(file)
+            l = f"BM_{n:02d}"
+            row_data[f'QTD_{l}'] = historico_valores[chave].get(f'QTD_{l}', 0)
+            row_data[f'VAL_{l}'] = historico_valores[chave].get(f'VAL_{l}', 0)
+            row_data[f'REAJ_{l}'] = historico_valores[chave].get(f'REAJ_{l}', 0)
+        linhas_finais.append(row_data)
 
-    # Preenche vazios com zero (itens novos em medições antigas ou itens removidos)
-    df_consolidado = df_consolidado.fillna(0)
+    resultado = pd.DataFrame(linhas_finais)
 
-    # Identifica colunas para soma
-    col_qtd_todas = [c for c in df_consolidado.columns if 'QTD_BM' in c]
-    col_val_todas = [c for c in df_consolidado.columns if 'VAL_BM' in c]
-    col_reaj_todas = [c for c in df_consolidado.columns if 'REAJ_BM' in c]
+    # 4. TOTAIS ACUMULADOS
+    cols_qtd = [c for c in resultado.columns if 'QTD_BM' in c]
+    cols_val = [c for c in resultado.columns if 'VAL_BM' in c]
+    cols_reaj = [c for c in resultado.columns if 'REAJ_BM' in c]
 
-    df_consolidado['TOTAL_QTD'] = df_consolidado[col_qtd_todas].sum(axis=1)
-    df_consolidado['TOTAL_VALOR'] = df_consolidado[col_val_todas].sum(axis=1)
-    df_consolidado['TOTAL_REAJUSTE'] = df_consolidado[col_reaj_todas].sum(axis=1)
-    df_consolidado['TOTAL_GERAL'] = df_consolidado['TOTAL_VALOR'] + df_consolidado['TOTAL_REAJUSTE']
+    resultado['SOMA_QTD'] = resultado[cols_qtd].sum(axis=1)
+    resultado['SOMA_VALOR'] = resultado[cols_val].sum(axis=1)
+    resultado['SOMA_REAJUSTE'] = resultado[cols_reaj].sum(axis=1)
+    resultado['TOTAL_GERAL'] = resultado['SOMA_VALOR'] + resultado['SOMA_REAJUSTE']
 
-    # --- 4. EXIBIÇÃO E CURVA ABC ---
-
-    st.subheader("📊 Histórico Consolidado")
-    # Removemos a chave única técnica da visão do usuário
-    df_view = df_consolidado.drop(columns=['CHAVE_UNICA'])
+    # 5. LINHA DE TOTAL DA OBRA (SOMENTE ITENS COM UNIDADE)
+    servicos_reais = resultado[resultado['UNID'].str.strip() != ""].copy()
+    soma_v = servicos_reais['SOMA_VALOR'].sum()
+    soma_r = servicos_reais['SOMA_REAJUSTE'].sum()
     
-    # Formatação para exibição
-    cols_num = df_view.select_dtypes(include=['number']).columns
-    st.dataframe(df_view.style.format({c: formatar_br for c in cols_num}), use_container_width=True)
+    linha_total = pd.DataFrame([{
+        'SERVICO': '>>> TOTAL GERAL DA OBRA',
+        'SOMA_VALOR': soma_v, 'SOMA_REAJUSTE': soma_r, 'TOTAL_GERAL': soma_v + soma_r,
+        'COD': '', 'UNID': '', 'VAL_UNIT': 0, 'QTD_CONTR': 0
+    }])
+    
+    df_exibicao = pd.concat([resultado, linha_total], ignore_index=True).fillna(0)
 
-    # --- ABA CURVA ABC ---
+    # --- VISUALIZAÇÃO ---
+    st.subheader("✅ Histórico Consolidado e Estruturado")
+
+    def estilo_goinfra(row):
+        if ">>> TOTAL" in str(row['SERVICO']):
+            return ['background-color: #002b36; color: white; font-weight: bold'] * len(row)
+        if str(row['UNID']).strip() == "": # É uma Unidade Construtiva
+            return ['background-color: #f0f2f6; color: #1f77b4; font-weight: bold'] * len(row)
+        return [''] * len(row)
+
+    st.dataframe(
+        df_exibicao.style.apply(estilo_goinfra, axis=1).format({c: formatar_br for c in df_exibicao.select_dtypes('number').columns}),
+        use_container_width=True
+    )
+
+    # --- CURVA ABC ---
     st.divider()
-    st.subheader("📈 Curva ABC (Somente Serviços)")
-
-    # Filtro: Apenas serviços (UNID preenchida e VAL_UNIT > 0)
-    abc = df_consolidado[
-        (df_consolidado['UNID'] != 0) & 
-        (df_consolidado['UNID'] != "") & 
-        (df_consolidado['TOTAL_GERAL'] > 0)
-    ].copy()
-
+    st.subheader("📈 Curva ABC (Itens de Serviço)")
+    abc = servicos_reais[servicos_reais['TOTAL_GERAL'] > 0.01].sort_values('TOTAL_GERAL', ascending=False)
     if not abc.empty:
-        abc = abc.sort_values(by='TOTAL_GERAL', ascending=False)
-        total_obra = abc['TOTAL_GERAL'].sum()
-        abc['PART_PERC'] = (abc['TOTAL_GERAL'] / total_obra) * 100
-        abc['ACC_PERC'] = abc['PART_PERC'].cumsum()
+        total_abc = abc['TOTAL_GERAL'].sum()
+        abc['%_SIMPLES'] = (abc['TOTAL_GERAL'] / total_abc) * 100
+        abc['%_ACC'] = abc['%_SIMPLES'].cumsum()
+        abc['CLASSE'] = abc['%_ACC'].apply(lambda x: 'A' if x <= 80.01 else ('B' if x <= 95.01 else 'C'))
         
-        abc['CLASSE'] = abc['ACC_PERC'].apply(lambda x: 'A' if x <= 80 else ('B' if x <= 95 else 'C'))
-
-        st.write(f"**Valor Total Considerado para ABC:** R$ {formatar_br(total_obra)}")
         st.dataframe(
-            abc[['COD', 'SERVICO', 'UNID', 'TOTAL_GERAL', 'PART_PERC', 'ACC_PERC', 'CLASSE']]
-            .style.format({
-                'TOTAL_GERAL': formatar_br,
-                'PART_PERC': "{:.2f}%",
-                'ACC_PERC': "{:.2f}%"
-            }), use_container_width=True
+            abc[['COD', 'SERVICO', 'UNID', 'TOTAL_GERAL', '%_ACC', 'CLASSE']]
+            .style.format({'TOTAL_GERAL': formatar_br, '%_ACC': "{:.2f}%"}),
+            use_container_width=True
         )
 
-    # --- EXPORTAÇÃO ---
+    # Exportação
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_view.to_excel(writer, sheet_name='Historico', index=False)
-        if not abc.empty:
-            abc.to_excel(writer, sheet_name='CurvaABC', index=False)
-    
-    st.sidebar.divider()
-    st.sidebar.download_button("📥 Baixar Relatório Consolidado", output.getvalue(), "historico_obra_abc.xlsx")
+        df_exibicao.to_excel(writer, index=False, sheet_name='Historico')
+    st.sidebar.download_button("📥 Baixar Planilha Master", output.getvalue(), "historico_estruturado.xlsx")
