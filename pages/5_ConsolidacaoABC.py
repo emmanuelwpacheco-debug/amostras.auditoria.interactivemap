@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import re
+import xlsxwriter 
 
 st.set_page_config(page_title="Consolidador GOINFRA Estruturado", layout="wide")
 st.title("📑 Histórico Estruturado e Curva ABC")
