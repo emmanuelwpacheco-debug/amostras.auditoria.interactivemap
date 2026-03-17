@@ -137,69 +137,62 @@ if uploaded_files:
         use_container_width=True
     )
 
-    # --- CURVA ABC ---
-   # --- ABA: CURVA ABC (AJUSTADA PARA PI) ---
+   # --- ABA: CURVA ABC (LÓGICA INCLUSIVA DE FRONTEIRA) ---
     st.divider()
-    st.subheader("📈 Análise de Curva ABC (Baseada em Preços Iniciais - PI)")
+    st.subheader("📈 Análise de Curva ABC (Baseada em PI)")
 
-    # Legenda Explicativa
-    st.info("""
-    **Legenda do Relatório:**
-    * **PI (Preço Inicial):** Valor da medição conforme os preços unitários do contrato original.
-    * **Reajustamento:** Correção monetária aplicada sobre o PI conforme índices oficiais.
-    * **Total Geral:** Soma do PI + Reajustamento.
-    * **Curva ABC:** Calculada exclusivamente sobre o **PI Acumulado** para refletir a relevância física dos serviços.
-    """)
-
-    # Filtro: Apenas serviços reais (com Unidade) e com valor medido > 0
+    # Filtro de serviços com valor medido
     abc = servicos_reais[servicos_reais['SOMA_VALOR'] > 0.01].copy()
 
     if not abc.empty:
-        # Ordenação pelo PI (SOMA_VALOR) conforme solicitado
         abc = abc.sort_values(by='SOMA_VALOR', ascending=False)
         
         total_pi_abc = abc['SOMA_VALOR'].sum()
-        total_reaj_abc = abc['SOMA_REAJUSTE'].sum()
-        
-        # Cálculos da Curva baseados no PI
         abc['%_SIMPLES'] = (abc['SOMA_VALOR'] / total_pi_abc) * 100
         abc['%_ACC'] = abc['%_SIMPLES'].cumsum()
         
-        # Classificação Progressiva
-        def definir_classe(p):
-            if p <= 80.01: return 'A'
-            if p <= 95.01: return 'B'
-            return 'C'
-        
-        abc['CLASSE'] = abc['%_ACC'].apply(definir_classe)
+        # --- NOVA LÓGICA DE CLASSIFICAÇÃO (CRITÉRIO DE CORTE INCLUSIVO) ---
+        def classificar_inclusivo(row):
+            # Recupera o acumulado da linha anterior para saber se já tínhamos batido a meta
+            # Se o acumulado da linha ANTERIOR for menor que 80, esta linha ainda pode ser A
+            # Usamos o índice da linha no dataframe ordenado para checar
+            idx = abc.index.get_loc(row.name)
+            
+            if idx == 0: # Primeiro item sempre é A
+                return 'A'
+            
+            acc_anterior = abc.iloc[idx - 1]['%_ACC']
+            
+            if acc_anterior < 80.0:
+                return 'A'
+            elif acc_anterior < 95.0:
+                return 'B'
+            else:
+                return 'C'
 
-        # Resumo Financeiro em Colunas
+        abc['CLASSE'] = abc.apply(classificar_inclusivo, axis=1)
+
+        # Resumo Financeiro
         m1, m2, m3 = st.columns(3)
         m1.metric("Total Acumulado (PI)", f"R$ {formatar_br(total_pi_abc)}")
-        m2.metric("Total Reajustamento", f"R$ {formatar_br(total_reaj_abc)}")
-        m3.metric("Total Global (PI + Reaj)", f"R$ {formatar_br(total_pi_abc + total_reaj_abc)}")
+        m2.metric("Itens Classe A", len(abc[abc['CLASSE'] == 'A']))
+        m3.metric("Itens Classe B", len(abc[abc['CLASSE'] == 'B']))
 
-        # Exibição da Tabela ABC
-        # Renomeando colunas para clareza na visualização
-        abc_view = abc[[
-            'COD', 'SERVICO', 'UNID', 'VAL_UNIT', 
-            'SOMA_VALOR', '%_ACC', 'CLASSE'
-        ]].rename(columns={'SOMA_VALOR': 'VALOR ACUMULADO (PI)'})
-
+        # Estilização
         def color_classe(val):
             color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
             return f'color: {color}; font-weight: bold'
 
         st.dataframe(
-            abc_view.style.format({
-                'VAL_UNIT': formatar_br,
+            abc[['COD', 'SERVICO', 'UNID', 'SOMA_VALOR', '%_ACC', 'CLASSE']]
+            .rename(columns={'SOMA_VALOR': 'VALOR ACUMULADO (PI)'})
+            .style.format({
                 'VALOR ACUMULADO (PI)': formatar_br,
                 '%_ACC': "{:.2f}%"
             }).applymap(color_classe, subset=['CLASSE']),
             use_container_width=True
         )
-    else:
-        st.warning("Não há valores de Preço Inicial (PI) medidos para gerar a Curva ABC.")
+        
     # Exportação
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
