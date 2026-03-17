@@ -91,7 +91,7 @@ if uploaded_files:
             label = item['label']
             
          # Criamos a chave usando o índice 0 e o índice 9 (Coluna J)
-           df_bm['ORDEM_ORIGINAL'] = range(len(df_bm))
+         df_bm['ORDEM_ORIGINAL'] = range(len(df_bm))
 
             df_bm['CHAVE_JOIN'] = (
             df_bm.iloc[:, 0].astype(str).str.strip().str.upper() + "_" +
@@ -249,7 +249,7 @@ if uploaded_files:
     # Exportação Final
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        .to_excel(writer, sheet_name='Historico_Limpo', index=False)
+    resultado.to_excel(writer, sheet_name='Historico_Limpo', index=False)
         if not abc.empty:
             abc.to_excel(writer, sheet_name='Curva_ABC', index=False)
     
