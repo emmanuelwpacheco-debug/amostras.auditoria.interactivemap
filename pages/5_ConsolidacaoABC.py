@@ -189,26 +189,58 @@ if uploaded_files:
         m4.metric("Itens Classe B", f"{len(abc[abc['CLASSE'] == 'B'])}")
 
         # 4. EXIBIÇÃO DA TABELA ABC
-        def color_classe(val):
-            color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
-            return f'color: {color}; font-weight: bold'
-
-        # Seleção de colunas para a visão ABC
-        abc_view = abc[['COD', 'SERVICO', 'UNID', 'SOMA_VALOR', '%_ACC', 'CLASSE']].copy()
-        abc_view = abc_view.rename(columns={'SOMA_VALOR': 'VALOR ACUMULADO (PI)'})
-
-        st.dataframe(
-            abc_view.style.format({
-                'VALOR ACUMULADO (PI)': formatar_br,
-                '%_ACC': "{:.2f}%"
-            }).applymap(color_classe, subset=['CLASSE']),
-            use_container_width=True
-        )
-    else:
-        st.warning("Não há valores de Preço Inicial (PI) medidos para gerar a Curva ABC.")
-        
-    # Exportação
+        # --- 6. EXPORTAÇÃO FORMATADA (XLSXWRITER) ---
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_exibicao.to_excel(writer, index=False, sheet_name='Historico')
-    st.sidebar.download_button("📥 Baixar Planilha Master", output.getvalue(), "historico_estruturado.xlsx")
+    
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        # Aba 1: Histórico Consolidado
+        df_exibicao.to_excel(writer, sheet_name='Historico_Consolidado', index=False)
+        
+        # Aba 2: Curva ABC
+        if not abc.empty:
+            abc_export = abc[['COD', 'SERVICO', 'UNID', 'SOMA_VALOR', '%_ACC', 'CLASSE']].copy()
+            abc_export.rename(columns={'SOMA_VALOR': 'VALOR ACUMULADO (PI)'}, inplace=True)
+            abc_export.to_excel(writer, sheet_name='Curva_ABC', index=False)
+
+        # --- Início da Formatação Estética ---
+        workbook = writer.book
+        
+        # Definição de formatos
+        fmt_num = workbook.add_format({'num_format': '#,##0.00', 'align': 'center'})
+        fmt_perc = workbook.add_format({'num_format': '0.00"%"', 'align': 'center'})
+        fmt_header = workbook.add_format({
+            'bold': True, 'bg_color': '#002b36', 'font_color': 'white',
+            'border': 1, 'align': 'center', 'valign': 'vcenter'
+        })
+        fmt_uc = workbook.add_format({'bg_color': '#F0F2F6', 'bold': True})
+
+        # Aplicando na aba Histórico
+        worksheet1 = writer.sheets['Historico_Consolidado']
+        for col_num, value in enumerate(df_exibicao.columns):
+            worksheet1.write(0, col_num, value, fmt_header)
+            # Ajuste de largura das colunas
+            if value == 'SERVICO':
+                worksheet1.set_column(col_num, col_num, 60)
+            else:
+                worksheet1.set_column(col_num, col_num, 15, fmt_num)
+
+        # Aplicando na aba Curva ABC
+        if not abc.empty:
+            worksheet2 = writer.sheets['Curva_ABC']
+            for col_num, value in enumerate(abc_export.columns):
+                worksheet2.write(0, col_num, value, fmt_header)
+                if value == 'SERVICO':
+                    worksheet2.set_column(col_num, col_num, 60)
+                elif '%_ACC' in value:
+                    worksheet2.set_column(col_num, col_num, 15, fmt_perc)
+                else:
+                    worksheet2.set_column(col_num, col_num, 15, fmt_num)
+
+    st.sidebar.divider()
+    st.sidebar.success("✅ Relatório gerado com 2 abas!")
+    st.sidebar.download_button(
+        label="📥 Baixar Relatório Profissional (Excel)",
+        data=output.getvalue(),
+        file_name="relatorio_goinfra_consolidado.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
