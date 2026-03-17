@@ -137,34 +137,43 @@ if uploaded_files:
         use_container_width=True
     )
 
-   # --- ABA: CURVA ABC (LÓGICA INCLUSIVA DE FRONTEIRA) ---
+  # --- ABA: CURVA ABC (LÓGICA INCLUSIVA + LEGENDAS TÉCNICAS) ---
     st.divider()
-    st.subheader("📈 Análise de Curva ABC (Baseada em PI)")
+    st.subheader("📈 Análise de Curva ABC (Baseada em Preços Iniciais - PI)")
 
-    # Filtro de serviços com valor medido
+    # 1. QUADRO DE LEGENDAS TÉCNICAS
+    st.info("""
+    **Legenda e Metodologia do Relatório:**
+    * **PI (Preço Inicial):** Valor acumulado das medições calculado com os preços unitários do contrato original.
+    * **Reajustamento:** Valor da correção monetária acumulada sobre o PI.
+    * **Curva ABC:** O ranking e a classificação de relevância são calculados exclusivamente sobre o **PI**, conforme normas de engenharia de custos.
+    * **Critério de Corte (Inclusivo):** Pertencem à **Classe A** todos os itens até o primeiro serviço que atinge ou ultrapassa o acumulado de 80%. O mesmo critério se aplica à **Classe B** para o limite de 95%.
+    """)
+
+    # Filtro de serviços com valor medido (Preço Inicial > 0)
     abc = servicos_reais[servicos_reais['SOMA_VALOR'] > 0.01].copy()
 
     if not abc.empty:
+        # Ordenação decrescente pelo PI
         abc = abc.sort_values(by='SOMA_VALOR', ascending=False)
         
         total_pi_abc = abc['SOMA_VALOR'].sum()
+        total_reaj_abc = abc['SOMA_REAJUSTE'].sum()
+        
         abc['%_SIMPLES'] = (abc['SOMA_VALOR'] / total_pi_abc) * 100
         abc['%_ACC'] = abc['%_SIMPLES'].cumsum()
         
-        # --- NOVA LÓGICA DE CLASSIFICAÇÃO (CRITÉRIO DE CORTE INCLUSIVO) ---
+        # 2. LÓGICA DE CLASSIFICAÇÃO INCLUSIVA (CRITÉRIO DE CORTE)
         def classificar_inclusivo(row):
-            # Recupera o acumulado da linha anterior para saber se já tínhamos batido a meta
-            # Se o acumulado da linha ANTERIOR for menor que 80, esta linha ainda pode ser A
-            # Usamos o índice da linha no dataframe ordenado para checar
             idx = abc.index.get_loc(row.name)
-            
-            if idx == 0: # Primeiro item sempre é A
-                return 'A'
+            if idx == 0: return 'A' # O primeiro item é sempre A
             
             acc_anterior = abc.iloc[idx - 1]['%_ACC']
             
+            # Se o anterior ainda não tinha batido 80, este atual ainda é A (mesmo que passe de 80)
             if acc_anterior < 80.0:
                 return 'A'
+            # Se o anterior não tinha batido 95, este atual ainda é B
             elif acc_anterior < 95.0:
                 return 'B'
             else:
@@ -172,26 +181,31 @@ if uploaded_files:
 
         abc['CLASSE'] = abc.apply(classificar_inclusivo, axis=1)
 
-        # Resumo Financeiro
-        m1, m2, m3 = st.columns(3)
+        # 3. QUADRO DE RESUMO FINANCEIRO
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Acumulado (PI)", f"R$ {formatar_br(total_pi_abc)}")
-        m2.metric("Itens Classe A", len(abc[abc['CLASSE'] == 'A']))
-        m3.metric("Itens Classe B", len(abc[abc['CLASSE'] == 'B']))
+        m2.metric("Total Reajuste", f"R$ {formatar_br(total_reaj_abc)}")
+        m3.metric("Itens Classe A", f"{len(abc[abc['CLASSE'] == 'A'])}")
+        m4.metric("Itens Classe B", f"{len(abc[abc['CLASSE'] == 'B'])}")
 
-        # Estilização
+        # 4. EXIBIÇÃO DA TABELA ABC
         def color_classe(val):
             color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
             return f'color: {color}; font-weight: bold'
 
+        # Seleção de colunas para a visão ABC
+        abc_view = abc[['COD', 'SERVICO', 'UNID', 'SOMA_VALOR', '%_ACC', 'CLASSE']].copy()
+        abc_view = abc_view.rename(columns={'SOMA_VALOR': 'VALOR ACUMULADO (PI)'})
+
         st.dataframe(
-            abc[['COD', 'SERVICO', 'UNID', 'SOMA_VALOR', '%_ACC', 'CLASSE']]
-            .rename(columns={'SOMA_VALOR': 'VALOR ACUMULADO (PI)'})
-            .style.format({
+            abc_view.style.format({
                 'VALOR ACUMULADO (PI)': formatar_br,
                 '%_ACC': "{:.2f}%"
             }).applymap(color_classe, subset=['CLASSE']),
             use_container_width=True
         )
+    else:
+        st.warning("Não há valores de Preço Inicial (PI) medidos para gerar a Curva ABC.")
         
     # Exportação
     output = io.BytesIO()
