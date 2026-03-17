@@ -72,8 +72,10 @@ if uploaded_files:
         
         # CHAVE_JOIN baseada na nova coluna SERVICO (Coluna J)
         resultado['CHAVE_JOIN'] = (
-            resultado['COD'].astype(str).str.strip().str.upper() + "_" + 
-            resultado['SERVICO'].astype(str).str.strip().str.upper()
+        # --- ALTERAÇÃO 01: CHAVE POR POSIÇÃO ---
+        # Usamos o índice (index) para garantir que itens iguais em UCs diferentes sejam únicos
+        resultado['ORDEM_ORIGINAL'] = range(len(resultado))
+        resultado['CHAVE_JOIN'] = resultado.index.astype(str) + "_" + resultado['COD'].astype(str).str.strip().str.upper()
         )
         resultado['ORDEM_ORIGINAL'] = range(len(resultado))
 
@@ -90,10 +92,8 @@ if uploaded_files:
             label = item['label']
             
          # Criamos a chave usando o índice 0 e o índice 9 (Coluna J)
-            df_bm['CHAVE_JOIN'] = (
-                df_bm.iloc[:, 0].astype(str).str.strip().str.upper() + "_" + 
-                df_bm.iloc[:, 9].astype(str).str.strip().str.upper()
-            )
+            # --- ALTERAÇÃO 02: CHAVE POR POSIÇÃO NA INTEGRAÇÃO ---
+            df_bm['CHAVE_JOIN'] = df_bm.index.astype(str) + "_" + df_bm.iloc[:, 0].astype(str).str.strip().str.upper()
             
             cols_med = [c for c in df_bm.columns if 'DA MEDIÇÃO' in c]
             c_reaj = next((c for c in df_bm.columns if 'REAJUSTE' in c or 'REAJUSTAMENTO' in c), None)
@@ -139,15 +139,37 @@ if uploaded_files:
     resultado = resultado.fillna("")
 
     # Cálculos Finais
-    c_qtds = [c for c in resultado.columns if 'QTD_BM' in c]
-    c_vals = [c for c in resultado.columns if 'VALOR_BM' in c]
-    c_reajs = [c for c in resultado.columns if 'REAJ_BM' in c]
+    # --- ALTERAÇÃO 03: CRIAÇÃO DA LINHA DE TOTAL ---
+    # Somamos apenas onde existe UNID (evita somar cabeçalhos/títulos)
+    df_servicos_apenas = resultado[resultado['UNID'].astype(str).str.strip() != ""].copy()
+    
+    total_val = df_servicos_apenas['VALOR_ACUMULADO'].sum()
+    total_reaj = df_servicos_apenas['REAJUSTE_ACUMULADO'].sum()
+    total_geral = total_val + total_reaj
 
-    resultado['QTD_ACUMULADA'] = resultado[c_qtds].sum(axis=1)
-    resultado['VALOR_ACUMULADO'] = resultado[c_vals].sum(axis=1)
-    resultado['REAJUSTE_ACUMULADO'] = resultado[c_reajs].sum(axis=1)
-    resultado['TOTAL_GERAL'] = resultado['VALOR_ACUMULADO'] + resultado['REAJUSTE_ACUMULADO']
+    # Criamos um dicionário para a nova linha
+    linha_total = {
+        'SERVICO': '>>> TOTAL GERAL DA OBRA (SOMA DOS ITENS)',
+        'VALOR_ACUMULADO': total_val,
+        'REAJUSTE_ACUMULADO': total_reaj,
+        'TOTAL_GERAL': total_geral,
+        'COD': '', 'UNID': '', 'PRECO_UNIT': 0, 'QTD_ORC': 0
+    }
+    
+    # Criamos o dataframe de exibição e anexamos o total
+    df_exibicao = resultado.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL'])
+    df_exibicao = pd.concat([df_exibicao, pd.DataFrame([linha_total])], ignore_index=True)
 
+    # Ajuste no destaque visual (opcional para colorir a linha de total)
+    def destacar_titulos(row):
+        if ">>> TOTAL" in str(row['SERVICO']):
+            return ['background-color: #002b36; color: white; font-weight: bold'] * len(row)
+        try:
+            p_unit = float(row['PRECO_UNIT']) if row['PRECO_UNIT'] != "" else 0
+            if p_unit == 0:
+                return ['background-color: #f0f2f6; font-weight: bold; color: #1f77b4'] * len(row)
+        except: pass
+        return [''] * len(row)
     # Criamos o dataframe final de exibição removendo as colunas de controle
     df_exibicao = resultado.drop(columns=['CHAVE_JOIN', 'ORDEM_ORIGINAL'])
 
