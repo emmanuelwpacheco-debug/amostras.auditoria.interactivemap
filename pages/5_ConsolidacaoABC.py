@@ -5,7 +5,7 @@ import re
 import xlsxwriter 
 
 st.set_page_config(page_title="Consolidador GOINFRA Estruturado", layout="wide")
-st.title("📑 Histórico Estruturado e Curva ABC")
+st.title("📑 Histórico Estruturado e Curva ABC (Busca Dinâmica)")
 
 uploaded_files = st.sidebar.file_uploader(
     "Carregue as medições (.xls ou .xlsx)", 
@@ -13,94 +13,130 @@ uploaded_files = st.sidebar.file_uploader(
     accept_multiple_files=True
 )
 
-def extrair_id_medicao(file):
-    try:
-        engine = 'xlrd' if file.name.endswith('.xls') else 'openpyxl'
-        df_ref = pd.read_excel(file, nrows=12, usecols="J", header=None, engine=engine)
-        texto = str(df_ref.iloc[11, 0])
-        match = re.search(r'(\d+)', texto)
-        return int(match.group(1)) if match else 999
-    except: return 999
-
 def formatar_br(valor):
     if pd.isna(valor) or valor == 0: return "0,00"
     return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-if uploaded_files:
-    # 1. ORDENAÇÃO
-    processados = sorted(uploaded_files, key=extrair_id_medicao)
-    
-    # Dicionário Mestre: Chave Única -> Dados do Item
-    # A chave será uma combinação de (Nome da UC + Código + Descrição + Índice de Ocorrência)
-    esqueleto_mestre = []
-    dados_por_item = {} # Armazena {chave: {colunas_fixas}}
-    historico_valores = {} # Armazena {chave: {BM_01: valor, ...}}
-
-    # Mapeamento de Colunas (Índices Reais do Excel - 0-based)
-    # A=0, J=9, AD=29, AI=34, AO=40, AU=46, BI=60, CF=83
-    IDX_COD = 0; IDX_SERV = 9; IDX_UNID = 29; IDX_VUNIT = 34; IDX_QCONTR = 40
-    IDX_QMED = 46; IDX_VMED = 60; IDX_REAJ = 83
-
-    # 2. CONSTRUÇÃO DO ESQUELETO EVOLUTIVO
-    for file in processados:
-        n_bm = extrair_id_medicao(file)
-        label = f"BM_{n_bm:02d}"
+def analisar_planilha_dinamica(file):
+    """Varre a planilha para identificar o número da BM e as colunas por palavras-chave."""
+    try:
         engine = 'xlrd' if file.name.endswith('.xls') else 'openpyxl'
+        # Lemos as primeiras 60 linhas para encontrar metadados e cabeçalho
+        df_busca = pd.read_excel(file, nrows=60, header=None, engine=engine)
         
-        df = pd.read_excel(file, skiprows=25, header=None, engine=engine)
+        num_bm = 999
+        linha_cabecalho = None
+        mapa = {}
+
+        for i, linha in df_busca.iterrows():
+            linha_str = [str(c).strip().upper() for c in linha]
+            
+            # 1. Busca Número da Medição (Ex: "2 - 2º Medição")
+            if any("MEDIÇÃO" in s for s in linha_str):
+                for celula in linha_str:
+                    if "MEDIÇÃO" in celula:
+                        match = re.search(r'(\d+)', celula)
+                        if match: num_bm = int(match.group(1))
+
+            # 2. Busca Linha de Cabeçalho (Palavra-Chave "CÓDIGO")
+            if "CÓDIGO" in linha_str:
+                linha_cabecalho = i
+                for idx, col_nome in enumerate(linha_str):
+                    if "CÓDIGO" == col_nome: mapa['COD'] = idx
+                    elif "SERVIÇO" in col_nome: mapa['SERV'] = idx
+                    elif "UNID" in col_nome: mapa['UNID'] = idx
+                    elif "UNITÁRIO" in col_nome: mapa['VUNIT'] = idx
+                    elif "CONTRATADA" in col_nome: mapa['QCONT'] = idx
+                    elif "REAJUSTAMENTO" in col_nome: mapa['REAJ'] = idx
+                    
+                    # Diferenciação Qtd Medição vs Valor Medição
+                    elif "DA MEDIÇÃO" in col_nome:
+                        # Checa se acima ou na própria célula tem 'QUANT' ou 'VALOR'
+                        # Se não encontrar, assume-se a ordem padrão (Qtd vem antes de Valor)
+                        if "QMED" not in mapa: mapa['QMED'] = idx
+                        else: mapa['VMED'] = idx
+                
+                # Se achou o código, encerra a busca de cabeçalho
+                break
+
+        return num_bm, linha_cabecalho, mapa
+    except Exception as e:
+        st.error(f"Erro ao analisar o arquivo {file.name}: {e}")
+        return 999, None, {}
+
+if uploaded_files:
+    # 1. ANÁLISE INICIAL E ORDENAÇÃO
+    arquivos_processados = []
+    for f in uploaded_files:
+        n, lin, m = analisar_planilha_dinamica(f)
+        if lin is not None:
+            arquivos_processados.append({'file': f, 'n': n, 'linha_ini': lin, 'mapa': m})
+    
+    arquivos_processados = sorted(arquivos_processados, key=lambda x: x['n'])
+
+    # 2. CONSTRUÇÃO DO ESQUELETO E HISTÓRICO
+    esqueleto_mestre = []
+    dados_por_item = {}
+    historico_valores = {}
+
+    for info in arquivos_processados:
+        f = info['file']
+        label = f"BM_{info['n']:02d}"
+        mapa = info['mapa']
+        engine = 'xlrd' if f.name.endswith('.xls') else 'openpyxl'
         
-        # Corte no "TOTAL MÃO-DE-OBRA"
-        corte = df[df.iloc[:, 0].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
+        # Lê a planilha a partir da linha identificada (skiprows = linha_cabecalho + 1)
+        df = pd.read_excel(f, skiprows=info['linha_ini'] + 1, header=None, engine=engine)
+        
+        # Filtro de fim (TOTAL MÃO-DE-OBRA na coluna de Código)
+        idx_cod_ref = mapa.get('COD', 0)
+        corte = df[df.iloc[:, idx_cod_ref].astype(str).str.contains("TOTAL MÃO-DE-OBRA", case=False, na=False)].index
         if not corte.empty: df = df.iloc[:corte[0]]
 
         uc_atual = "INÍCIO"
         contagem_ocorrência = {}
 
         for _, row in df.iterrows():
-            cod = str(row[IDX_COD]).strip() if not pd.isna(row[IDX_COD]) else ""
-            serv = str(row[IDX_SERV]).strip() if not pd.isna(row[IDX_SERV]) else ""
-            unid = str(row[IDX_UNID]).strip() if not pd.isna(row[IDX_UNID]) else ""
+            cod = str(row[mapa.get('COD', 0)]).strip() if not pd.isna(row[mapa.get('COD')]) else ""
+            serv = str(row[mapa.get('SERV', 1)]).strip() if not pd.isna(row[mapa.get('SERV')]) else ""
+            unid = str(row[mapa.get('UNID', 2)]).strip() if 'UNID' in mapa and not pd.isna(row[mapa['UNID']]) else ""
             
-            # Identifica Unidade Construtiva (Unid vazia e Serviço presente)
-            if (unid == "" or unid == "nan") and serv != "":
+            if (unid == "" or unid == "nan" or unid == "0") and serv != "":
                 uc_atual = serv
             
-            # Gerar Chave Única para rastreabilidade
             chave_base = f"{uc_atual}|{cod}|{serv}"
             contagem_ocorrência[chave_base] = contagem_ocorrência.get(chave_base, 0) + 1
             chave_final = f"{chave_base}|{contagem_ocorrência[chave_base]}"
 
-            # Se o item é novo (Aditivo), insere no esqueleto mestre
             if chave_final not in dados_por_item:
                 dados_por_item[chave_final] = {
                     'COD': cod, 'SERVICO': serv, 'UNID': unid, 
-                    'VAL_UNIT': row[IDX_VUNIT], 'QTD_CONTR': row[IDX_QCONTR]
+                    'VAL_UNIT': row[mapa.get('VUNIT', 0)] if 'VUNIT' in mapa else 0,
+                    'QTD_CONTR': row[mapa.get('QCONT', 0)] if 'QCONT' in mapa else 0
                 }
-                # Mantém a ordem física: se for novo, adicionamos à lista de sequência
                 esqueleto_mestre.append(chave_final)
             
-            # Armazena os valores desta medição específica
             if chave_final not in historico_valores: historico_valores[chave_final] = {}
-            historico_valores[chave_final][f'QTD_{label}'] = pd.to_numeric(row[IDX_QMED], errors='coerce') or 0
-            historico_valores[chave_final][f'VAL_{label}'] = pd.to_numeric(row[IDX_VMED], errors='coerce') or 0
-            historico_valores[chave_final][f'REAJ_{label}'] = pd.to_numeric(row[IDX_REAJ], errors='coerce') or 0
+            
+            # Captura de valores com verificação de existência de coluna
+            historico_valores[chave_final][f'QTD_{label}'] = pd.to_numeric(row[mapa.get('QMED')], errors='coerce') if 'QMED' in mapa else 0
+            historico_valores[chave_final][f'VAL_{label}'] = pd.to_numeric(row[mapa.get('VMED')], errors='coerce') if 'VMED' in mapa else 0
+            historico_valores[chave_final][f'REAJ_{label}'] = pd.to_numeric(row[mapa.get('REAJ')], errors='coerce') if 'REAJ' in mapa else 0
 
     # 3. MONTAGEM DO DATAFRAME FINAL
     linhas_finais = []
     for chave in esqueleto_mestre:
         row_data = dados_por_item[chave].copy()
-        # Adiciona os valores de cada BM (se não existir na BM, coloca 0)
-        for file in processados:
-            n = extrair_id_medicao(file)
-            l = f"BM_{n:02d}"
+        for info in arquivos_processados:
+            l = f"BM_{info['n']:02d}"
             row_data[f'QTD_{l}'] = historico_valores[chave].get(f'QTD_{l}', 0)
             row_data[f'VAL_{l}'] = historico_valores[chave].get(f'VAL_{l}', 0)
             row_data[f'REAJ_{l}'] = historico_valores[chave].get(f'REAJ_{l}', 0)
         linhas_finais.append(row_data)
 
-    resultado = pd.DataFrame(linhas_finais)
+    resultado = pd.DataFrame(linhas_finais).fillna(0)
 
-    # 4. TOTAIS ACUMULADOS
+    # 4. TOTAIS E VISUALIZAÇÃO
     cols_qtd = [c for c in resultado.columns if 'QTD_BM' in c]
     cols_val = [c for c in resultado.columns if 'VAL_BM' in c]
     cols_reaj = [c for c in resultado.columns if 'REAJ_BM' in c]
@@ -110,181 +146,74 @@ if uploaded_files:
     resultado['SOMA_REAJUSTE'] = resultado[cols_reaj].sum(axis=1)
     resultado['TOTAL_GERAL'] = resultado['SOMA_VALOR'] + resultado['SOMA_REAJUSTE']
 
-    # 5. LINHA DE TOTAL DA OBRA (SOMENTE ITENS COM UNIDADE)
-    servicos_reais = resultado[resultado['UNID'].str.strip() != ""].copy()
+    # Filtro de serviços e linha de total
+    servicos_reais = resultado[resultado['UNID'].astype(str).str.strip().isin(['', '0', '0.0', 'nan']) == False].copy()
     soma_v = servicos_reais['SOMA_VALOR'].sum()
     soma_r = servicos_reais['SOMA_REAJUSTE'].sum()
     
-    linha_total = pd.DataFrame([{
-        'SERVICO': '>>> TOTAL GERAL DA OBRA',
-        'SOMA_VALOR': soma_v, 'SOMA_REAJUSTE': soma_r, 'TOTAL_GERAL': soma_v + soma_r,
-        'COD': '', 'UNID': '', 'VAL_UNIT': 0, 'QTD_CONTR': 0
-    }])
-    
+    linha_total = pd.DataFrame([{'SERVICO': '>>> TOTAL GERAL DA OBRA', 'SOMA_VALOR': soma_v, 'SOMA_REAJUSTE': soma_r, 'TOTAL_GERAL': soma_v+soma_r}])
     df_exibicao = pd.concat([resultado, linha_total], ignore_index=True).fillna(0)
 
-    # --- VISUALIZAÇÃO ---
-    st.subheader("✅ Histórico Consolidado e Estruturado")
+    st.subheader("✅ Histórico Consolidado (Dinâmico)")
 
     def estilo_goinfra(row):
         if ">>> TOTAL" in str(row['SERVICO']):
             return ['background-color: #002b36; color: white; font-weight: bold'] * len(row)
-        if str(row['UNID']).strip() == "": # É uma Unidade Construtiva
+        unid_str = str(row['UNID']).strip()
+        if unid_str in ["", "0", "0.0", "nan"]:
             return ['background-color: #f0f2f6; color: #1f77b4; font-weight: bold'] * len(row)
         return [''] * len(row)
 
-    st.dataframe(
-        df_exibicao.style.apply(estilo_goinfra, axis=1).format({c: formatar_br for c in df_exibicao.select_dtypes('number').columns}),
-        use_container_width=True
-    )
+    st.dataframe(df_exibicao.style.apply(estilo_goinfra, axis=1).format({c: formatar_br for c in df_exibicao.select_dtypes('number').columns}), use_container_width=True)
 
-  # --- ABA: CURVA ABC (LÓGICA INCLUSIVA + LEGENDAS TÉCNICAS) ---
+    # 5. CURVA ABC (Mesma lógica anterior, mas baseada nos novos dados)
     st.divider()
-    st.subheader("📈 Análise de Curva ABC (Baseada em Preços Iniciais - PI)")
-
-    # 1. QUADRO DE LEGENDAS TÉCNICAS
-    st.info("""
-    **Legenda e Metodologia do Relatório:**
-    * **PI (Preço Inicial):** Valor acumulado das medições calculado com os preços unitários do contrato original.
-    * **Reajustamento:** Valor da correção monetária acumulada sobre o PI.
-    * **Curva ABC:** O ranking e a classificação de relevância são calculados exclusivamente sobre o **PI**, conforme normas de engenharia de custos.
-    * **Critério de Corte (Inclusivo):** Pertencem à **Classe A** todos os itens até o primeiro serviço que atinge ou ultrapassa o acumulado de 80%. O mesmo critério se aplica à **Classe B** para o limite de 95%.
-    """)
-
-    # Filtro de serviços com valor medido (Preço Inicial > 0)
+    st.subheader("📈 Curva ABC (Baseada em PI)")
     abc = servicos_reais[servicos_reais['SOMA_VALOR'] > 0.01].copy()
-
     if not abc.empty:
-        # Ordenação decrescente pelo PI
         abc = abc.sort_values(by='SOMA_VALOR', ascending=False)
+        total_pi = abc['SOMA_VALOR'].sum()
+        abc['%_ACC'] = (abc['SOMA_VALOR'] / total_pi).cumsum() * 100
         
-        total_pi_abc = abc['SOMA_VALOR'].sum()
-        total_reaj_abc = abc['SOMA_REAJUSTE'].sum()
-        
-        abc['%_SIMPLES'] = (abc['SOMA_VALOR'] / total_pi_abc) * 100
-        abc['%_ACC'] = abc['%_SIMPLES'].cumsum()
-        
-        # 2. LÓGICA DE CLASSIFICAÇÃO INCLUSIVA (CRITÉRIO DE CORTE)
         def classificar_inclusivo(row):
             idx = abc.index.get_loc(row.name)
-            if idx == 0: return 'A' # O primeiro item é sempre A
+            if idx == 0: return 'A'
+            acc_ant = abc.iloc[idx - 1]['%_ACC']
+            if acc_ant < 80.0: return 'A'
+            elif acc_ant < 95.0: return 'B'
+            return 'C'
             
-            acc_anterior = abc.iloc[idx - 1]['%_ACC']
-            
-            # Se o anterior ainda não tinha batido 80, este atual ainda é A (mesmo que passe de 80)
-            if acc_anterior < 80.0:
-                return 'A'
-            # Se o anterior não tinha batido 95, este atual ainda é B
-            elif acc_anterior < 95.0:
-                return 'B'
-            else:
-                return 'C'
-
         abc['CLASSE'] = abc.apply(classificar_inclusivo, axis=1)
+        st.dataframe(abc[['COD', 'SERVICO', 'UNID', 'SOMA_VALOR', '%_ACC', 'CLASSE']].style.format({'SOMA_VALOR': formatar_br, '%_ACC': "{:.2f}%"}))
 
-        # 3. QUADRO DE RESUMO FINANCEIRO
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Acumulado (PI)", f"R$ {formatar_br(total_pi_abc)}")
-        m2.metric("Total Reajuste", f"R$ {formatar_br(total_reaj_abc)}")
-        m3.metric("Itens Classe A", f"{len(abc[abc['CLASSE'] == 'A'])}")
-        m4.metric("Itens Classe B", f"{len(abc[abc['CLASSE'] == 'B'])}")
-
-        # 4. EXIBIÇÃO DA TABELA ABC
-        def color_classe(val):
-            color = '#d9534f' if val == 'A' else ('#f0ad4e' if val == 'B' else '#5cb85c')
-            return f'color: {color}; font-weight: bold'
-
-        # Seleção de colunas para a visão ABC
-        abc_view = abc[['COD', 'SERVICO', 'UNID', 'SOMA_VALOR', '%_ACC', 'CLASSE']].copy()
-        abc_view = abc_view.rename(columns={'SOMA_VALOR': 'VALOR ACUMULADO (PI)'})
-
-        st.dataframe(
-            abc_view.style.format({
-                'VALOR ACUMULADO (PI)': formatar_br,
-                '%_ACC': "{:.2f}%"
-            }).applymap(color_classe, subset=['CLASSE']),
-            use_container_width=True
-        )
-    else:
-        st.warning("Não há valores de Preço Inicial (PI) medidos para gerar a Curva ABC.")
-    
-   # --- 6. EXPORTAÇÃO FORMATADA E RESTRUTURADA ---
+    # 6. EXPORTAÇÃO XLSWRITER (DINÂMICA)
     output = io.BytesIO()
-    
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # 1. Preparação dos dados para o Histórico (Nomes de Colunas amigáveis)
-        # Vamos renomear as colunas dinamicamente para o padrão solicitado
         df_hist_export = df_exibicao.copy()
+        # Renomeação dinâmica dos cabeçalhos para o Excel
         novos_nomes = {}
         for col in df_hist_export.columns:
-            if col.startswith('QTD_BM_'):
-                num = col.split('_')[-1]
-                novos_nomes[col] = f'Quantidade BM {num}'
-            elif col.startswith('VAL_BM_'):
-                num = col.split('_')[-1]
-                novos_nomes[col] = f'Valor BM {num}'
-            elif col.startswith('REAJ_BM_'):
-                num = col.split('_')[-1]
-                novos_nomes[col] = f'Valor Reajuste BM {num}'
+            if 'QTD_BM' in col: novos_nomes[col] = f"Quantidade BM {col.split('_')[-1]}"
+            elif 'VAL_BM' in col: novos_nomes[col] = f"Valor BM {col.split('_')[-1]}"
+            elif 'REAJ_BM' in col: novos_nomes[col] = f"Valor Reajuste BM {col.split('_')[-1]}"
         
-        df_hist_export.rename(columns=novos_nomes, inplace=True)
-        df_hist_export.to_excel(writer, sheet_name='Historico_Consolidado', index=False)
-        
-        # 2. Preparação da Curva ABC
-        if not abc.empty:
-            abc_export = abc[['COD', 'SERVICO', 'UNID', 'SOMA_VALOR', '%_ACC', 'CLASSE']].copy()
-            abc_export.rename(columns={'SOMA_VALOR': 'VALOR ACUMULADO (PI)'}, inplace=True)
-            abc_export.to_excel(writer, sheet_name='Curva_ABC', index=False)
+        df_hist_export.rename(columns=novos_nomes, inplace=True).to_excel(writer, sheet_name='Historico_Consolidado', index=False)
+        if not abc.empty: abc.to_excel(writer, sheet_name='Curva_ABC', index=False)
 
-        # --- Formatação Estética Avançada ---
         workbook = writer.book
-        
-        # Definição de formatos
         fmt_header = workbook.add_format({'bold': True, 'bg_color': '#002b36', 'font_color': 'white', 'border': 1, 'align': 'center'})
-        fmt_num = workbook.add_format({'num_format': '#,##0.00'})
-        fmt_perc = workbook.add_format({'num_format': '0.00"%"'})
-        
-        # Formato para Unidades Construtivas (Negrito e cinza claro)
         fmt_uc = workbook.add_format({'bold': True, 'bg_color': '#EFEFEF', 'border': 1})
-        
-        # Formato para Classe A (Negrito)
         fmt_classe_a = workbook.add_format({'bold': True})
+        fmt_num = workbook.add_format({'num_format': '#,##0.00'})
 
-        # --- Aplicando na aba Histórico ---
         ws1 = writer.sheets['Historico_Consolidado']
         for col_num, value in enumerate(df_hist_export.columns):
             ws1.write(0, col_num, value, fmt_header)
-            # Largura das colunas
-            if value == 'SERVICO': ws1.set_column(col_num, col_num, 60)
-            else: ws1.set_column(col_num, col_num, 18, fmt_num)
+            ws1.set_column(col_num, col_num, 60 if value == 'SERVICO' else 18, fmt_num)
 
-        # Aplicando lógica de linhas (UCs em Negrito)
         for row_num in range(len(df_hist_export)):
-            # Se UNID estiver vazia, é uma Unidade Construtiva
             unid_val = str(df_hist_export.iloc[row_num]['UNID']).strip()
-            if unid_val == "" or unid_val == "0" or unid_val == "0.0":
+            if unid_val in ["", "0", "0.0", "nan"]:
                 ws1.set_row(row_num + 1, None, fmt_uc)
 
-        # --- Aplicando na aba Curva ABC ---
-        if not abc.empty:
-            ws2 = writer.sheets['Curva_ABC']
-            for col_num, value in enumerate(abc_export.columns):
-                ws2.write(0, col_num, value, fmt_header)
-                if value == 'SERVICO': ws2.set_column(col_num, col_num, 60)
-                elif '%_ACC' in value: ws2.set_column(col_num, col_num, 15, fmt_perc)
-                else: ws2.set_column(col_num, col_num, 18, fmt_num)
-
-            # Lógica para Classe A em Negrito
-            for row_num in range(len(abc_export)):
-                classe_val = abc_export.iloc[row_num]['CLASSE']
-                if classe_val == 'A':
-                    ws2.set_row(row_num + 1, None, fmt_classe_a)
-
-    st.sidebar.divider()
-    st.sidebar.success("✅ Excel formatado com sucesso!")
-    st.sidebar.download_button(
-        label="📥 Baixar Relatório Profissional (Excel)",
-        data=output.getvalue(),
-        file_name="relatorio_goinfra_estruturado.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    st.sidebar.download_button("📥 Baixar Relatório", output.getvalue(), "relatorio_goinfra_dinamico.xlsx")
