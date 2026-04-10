@@ -27,7 +27,4 @@ lxml
 simplekml
 xlrd
 xlsxwriter
-tesseract-ocr
-tesseract-ocr-por
-libtesseract-dev
-poppler-utils
+
