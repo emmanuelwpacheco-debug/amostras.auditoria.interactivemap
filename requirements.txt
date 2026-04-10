@@ -27,3 +27,8 @@ lxml
 simplekml
 xlrd
 xlsxwriter
+anthropic
+base64
+json
+io
+re
