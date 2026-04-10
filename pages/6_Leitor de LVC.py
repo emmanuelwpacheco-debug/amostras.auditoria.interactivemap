@@ -1,6 +1,5 @@
 import streamlit as st
 import io
-import re
 import cv2
 import numpy as np
 import pytesseract
@@ -16,75 +15,94 @@ st.set_page_config(page_title="Leitor de LVC - Auditoria", layout="wide")
 def get_cells_from_table(image):
     """
     Detecta a estrutura da tabela e extrai as células individualmente.
+    Usa uma abordagem mais robusta para imagens com ruído ou variações.
     """
+    # Converter para OpenCV
     img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     
-    # Binarização para destacar as linhas da tabela
-    thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)[1]
+    # Binarização adaptativa para lidar com sombras e variações de iluminação
+    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY_INV, 11, 2)
     
-    # Detectar linhas horizontais e verticais
-    kernel_len = np.array(img_cv).shape[1] // 100
-    ver_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_len))
-    hor_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
+    # Definir tamanho dos kernels para detectar linhas
+    # Usamos uma fração da largura/altura para sermos dinâmicos
+    height, width = thresh.shape
+    horizontal_size = width // 30
+    vertical_size = height // 30
     
-    image_1 = cv2.erode(thresh, ver_kernel, iterations=3)
-    vertical_lines = cv2.dilate(image_1, ver_kernel, iterations=3)
+    # Detectar linhas horizontais
+    hor_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (horizontal_size, 1))
+    horizontal_lines = cv2.erode(thresh, hor_kernel, iterations=1)
+    horizontal_lines = cv2.dilate(horizontal_lines, hor_kernel, iterations=3)
     
-    image_2 = cv2.erode(thresh, hor_kernel, iterations=3)
-    horizontal_lines = cv2.dilate(image_2, hor_kernel, iterations=3)
+    # Detectar linhas verticais
+    ver_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, vertical_size))
+    vertical_lines = cv2.erode(thresh, ver_kernel, iterations=1)
+    vertical_lines = cv2.dilate(vertical_lines, ver_kernel, iterations=3)
     
-    # Combinar linhas para formar a grade
-    table_segment = cv2.addWeighted(vertical_lines, 0.5, horizontal_lines, 0.5, 0.0)
-    table_segment = cv2.threshold(table_segment, 0, 255, cv2.THRESH_BINARY)[1]
+    # Máscara da tabela
+    table_mask = cv2.add(horizontal_lines, vertical_lines)
     
-    # Encontrar contornos das células
-    contours, _ = cv2.findContours(table_segment, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    # Encontrar contornos
+    contours, _ = cv2.findContours(table_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Organizar contornos por posição (Y, X)
-    def get_contour_precedence(contour, cols):
-        tolerance_factor = 10
-        origin = cv2.boundingRect(contour)
-        return ((origin[1] // tolerance_factor) * tolerance_factor) * cols + origin[0]
+    # Filtrar contornos que parecem ser a tabela principal
+    if not contours:
+        return gray, []
 
-    # Filtrar apenas contornos que parecem células (evitar ruídos muito pequenos ou muito grandes)
+    # Pegar o maior contorno (provavelmente a borda externa da tabela)
+    table_contour = max(contours, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(table_contour)
+    
+    # Agora encontramos as células dentro dessa região
+    table_roi = table_mask[y:y+h, x:x+w]
+    inner_contours, _ = cv2.findContours(table_roi, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
     cells = []
-    for c in contours:
-        x, y, w, h = cv2.boundingRect(c)
-        if 20 < w < 1000 and 15 < h < 100:
-            cells.append(c)
+    for c in inner_contours:
+        cx, cy, cw, ch = cv2.boundingRect(c)
+        # Filtro de tamanho para evitar ruídos e a própria tabela externa
+        if 20 < cw < w*0.9 and 15 < ch < h*0.1:
+            # Ajustar coordenadas para a imagem original
+            cells.append((x + cx, y + cy, cw, ch))
             
-    # Ordenar células (cima para baixo, esquerda para direita)
-    cells = sorted(cells, key=lambda c: get_contour_precedence(c, img_cv.shape[1]))
+    # Ordenar células: Primeiro por Y (linha) e depois por X (coluna)
+    # Usamos uma tolerância de pixels para agrupar na mesma linha
+    cells = sorted(cells, key=lambda b: (b[1] // 10, b[0]))
     
     return gray, cells
 
-def analyze_cell(gray_img, contour, is_checkbox=False):
+def analyze_cell(gray_img, rect, is_checkbox=False):
     """
-    Analisa o conteúdo de uma célula específica.
+    Analisa o conteúdo de uma célula baseada nas coordenadas.
     """
-    x, y, w, h = cv2.boundingRect(contour)
+    x, y, w, h = rect
     cell_roi = gray_img[y:y+h, x:x+w]
     
-    # Margem para ignorar a borda da tabela
-    margin = 5
+    # Margem interna
+    margin = 3
     if h > 2*margin and w > 2*margin:
         cell_roi = cell_roi[margin:-margin, margin:-margin]
     
     if is_checkbox:
-        # Para checkboxes, medimos a densidade de "tinta"
-        thresh = cv2.threshold(cell_roi, 180, 255, cv2.THRESH_BINARY_INV)[1]
-        non_zero = cv2.countNonZero(thresh)
-        ratio = non_zero / float(w * h)
-        return ratio > 0.1  # Se > 10% estiver preenchido, consideramos marcado
+        # Threshold para detectar caneta (marcas escuras)
+        _, binary = cv2.threshold(cell_roi, 150, 255, cv2.THRESH_BINARY_INV)
+        total_pixels = binary.size
+        black_pixels = cv2.countNonZero(binary)
+        density = black_pixels / total_pixels
+        return density > 0.05  # 5% de preenchimento já indica marcação
     else:
-        # Para texto, usamos OCR
-        text = pytesseract.image_to_string(cell_roi, config='--psm 6').strip()
+        # OCR para texto
+        config = '--psm 6'
+        text = pytesseract.image_to_string(cell_roi, config=config, lang='por').strip()
+        # Limpar caracteres comuns que o OCR confunde com lixo em células pequenas
+        text = text.replace('|', '').replace('_', '').strip()
         return text
 
 def process_lvc_sheet(uploaded_file):
     """
-    Processa a ficha mantendo a fidelidade de todas as linhas.
+    Processa a ficha identificando a estrutura de colunas dinamicamente.
     """
     images = []
     if uploaded_file.type == "application/pdf":
@@ -97,32 +115,49 @@ def process_lvc_sheet(uploaded_file):
     for img in images:
         gray, cells = get_cells_from_table(img)
         
-        # O PDF enviado tem colunas: KM_INI, KM_FIM, P, A, S, E, D, OBS, PONTO, FOTO (aprox 10 colunas)
-        # Vamos agrupar as células em linhas (geralmente 8 a 10 colunas por linha)
-        num_cols = 10 
-        rows_cells = [cells[i:i + num_cols] for i in range(0, len(cells), num_cols)]
-        
-        for r_cells in rows_cells:
-            if len(r_cells) < 5: continue # Pula se não for uma linha completa
-            
-            # Extração baseada na posição da coluna na ficha
-            km_ini = analyze_cell(gray, r_cells[0])
-            km_fim = analyze_cell(gray, r_cells[1])
-            
-            # Se não houver KM, pode ser cabeçalho ou ruído, mas vamos manter se houver KM
-            if not km_ini and not km_fim: continue
+        if not cells:
+            continue
 
-            row = {
-                "km_ini": km_ini,
-                "km_fim": km_fim,
-                "P": analyze_cell(gray, r_cells[2], is_checkbox=True),
-                "A": analyze_cell(gray, r_cells[3], is_checkbox=True),
-                "S": analyze_cell(gray, r_cells[4], is_checkbox=True),
-                "E": analyze_cell(gray, r_cells[4], is_checkbox=True), # Note: na ficha S e E as vezes dividem coluna
-                "D": analyze_cell(gray, r_cells[5], is_checkbox=True),
-                "observacoes": analyze_cell(gray, r_cells[6]) if len(r_cells) > 6 else ""
-            }
-            all_data.append(row)
+        # Tentar agrupar células em linhas baseando-se no Y
+        rows = []
+        if cells:
+            current_row = [cells[0]]
+            for i in range(1, len(cells)):
+                # Se a diferença de Y for pequena, pertence à mesma linha
+                if abs(cells[i][1] - current_row[-1][1]) < 15:
+                    current_row.append(cells[i])
+                else:
+                    rows.append(current_row)
+                    current_row = [cells[i]]
+            rows.append(current_row)
+
+        for r in rows:
+            # Uma linha válida de LVC tem pelo menos os KMs e colunas de marcação
+            # No modelo enviado, temos KM, KM, P, A, S, E, D, OBS...
+            if len(r) < 5: 
+                continue
+
+            # Mapeamento simplificado por posição na linha
+            # 0: KM inicial, 1: KM final, 2: P, 3: A, 4: S/E, 5: D, 6: Obs
+            try:
+                km_ini = analyze_cell(gray, r[0])
+                km_fim = analyze_cell(gray, r[1])
+                
+                # Só processa se o primeiro KM for um número ou algo parecido
+                if any(char.isdigit() for char in km_ini) or not km_ini:
+                    row_data = {
+                        "km_ini": km_ini,
+                        "km_fim": km_fim,
+                        "P": analyze_cell(gray, r[2], True) if len(r) > 2 else False,
+                        "A": analyze_cell(gray, r[3], True) if len(r) > 3 else False,
+                        "S": analyze_cell(gray, r[4], True) if len(r) > 4 else False,
+                        "E": False, # Tratado junto com S na maioria das fichas
+                        "D": analyze_cell(gray, r[5], True) if len(r) > 5 else False,
+                        "observacoes": analyze_cell(gray, r[6]) if len(r) > 6 else ""
+                    }
+                    all_data.append(row_data)
+            except:
+                continue
 
     return all_data
 
@@ -162,34 +197,39 @@ def build_excel(rows):
     wb.save(output)
     return output.getvalue()
 
-# --- UI ---
-st.title("🚜 Leitor de Fichas LVC (Fidelidade de Tabela)")
-st.markdown("Esta versão analisa a **grade da tabela** para garantir que linhas em branco sejam preservadas.")
+# --- Interface ---
+st.title("🚜 Leitor de Fichas LVC")
+st.markdown("Analise de tabelas com detecção de marcações manuscritas.")
 
-uploaded_file = st.file_uploader("Upload da Ficha (PDF ou Imagem)", type=['pdf', 'png', 'jpg'])
+uploaded_file = st.file_uploader("Upload da Ficha", type=['pdf', 'png', 'jpg'])
 
 if uploaded_file:
-    if st.button("Processar com Precisão de Tabela", type="primary"):
-        with st.spinner("Mapeando colunas e detectando marcações..."):
+    if st.button("Processar Ficha", type="primary"):
+        with st.spinner("Analisando estrutura da imagem..."):
             try:
                 data = process_lvc_sheet(uploaded_file)
-                st.success(f"Processamento finalizado. {len(data)} linhas detectadas.")
                 
-                df = pd.DataFrame(data)
-                # Visualização amigável
-                display_df = df.copy()
-                for col in ["P", "A", "S", "E", "D"]:
-                    display_df[col] = display_df[col].apply(lambda x: "✔️" if x else "")
-                
-                st.dataframe(display_df, use_container_width=True)
-                
-                excel_data = build_excel(data)
-                st.download_button(
-                    label="📥 Baixar Planilha Fiel à Ficha",
-                    data=excel_data,
-                    file_name=f"LVC_Fiel_{uploaded_file.name}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                if data:
+                    st.success(f"Sucesso! {len(data)} linhas identificadas.")
+                    df = pd.DataFrame(data)
+                    
+                    # Formatação visual para o Streamlit
+                    view_df = df.copy()
+                    for col in ["P", "A", "S", "E", "D"]:
+                        view_df[col] = view_df[col].apply(lambda x: "✔️" if x else "")
+                    
+                    st.dataframe(view_df, use_container_width=True)
+                    
+                    xlsx = build_excel(data)
+                    st.download_button(
+                        "📥 Baixar Planilha Excel",
+                        data=xlsx,
+                        file_name=f"LVC_Processada.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.warning("Nenhuma linha de dados foi detectada. Tente uma imagem com maior contraste ou menos inclinação.")
+                    
             except Exception as e:
-                st.error(f"Erro ao mapear tabela: {e}")
-                st.info("Dica: Certifique-se de que a ficha não está muito inclinada na foto.")
+                st.error(f"Erro no processamento: {e}")
+                st.info("Dica: Verifique se o arquivo está nítido e as linhas da tabela estão visíveis.")
